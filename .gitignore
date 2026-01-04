@@ -4,6 +4,7 @@
 # IntelliJ project files
 .idea
 *.iml
+.venv
 out
 gen
 data
