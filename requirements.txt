@@ -1,0 +1,25 @@
+# MPN Classification and Fibrosis Grading Framework
+# Core dependencies
+
+# Deep Learning
+torch>=2.0.0
+torchvision>=0.15.0
+
+# Image Processing
+Pillow>=9.0.0
+
+# Data Science
+numpy>=1.24.0
+scikit-learn>=1.2.0
+
+# Progress bars
+tqdm>=4.65.0
+
+# Explainability (for future use in explain.py)
+# Install manually if needed: pip install git+https://github.com/jacobgil/pytorch-grad-cam.git
+# grad-cam  # Commented out - may not be compatible with Python 3.13+
+
+# Visualization (for future use in evaluate.py)
+matplotlib>=3.7.0
+seaborn>=0.12.0
+
