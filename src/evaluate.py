@@ -23,6 +23,7 @@ from sklearn.metrics import (
     classification_report,
     confusion_matrix,
     f1_score,
+    fbeta_score,
     precision_score,
     recall_score,
 )
@@ -299,6 +300,8 @@ def compute_metrics(
         "accuracy": accuracy_score(y_true, y_pred),
         "f1_macro": f1_score(y_true, y_pred, average="macro", labels=labels, zero_division=0),
         "f1_weighted": f1_score(y_true, y_pred, average="weighted", labels=labels, zero_division=0),
+        "f2_macro": fbeta_score(y_true, y_pred, beta=2, average="macro", labels=labels, zero_division=0),
+        "f2_weighted": fbeta_score(y_true, y_pred, beta=2, average="weighted", labels=labels, zero_division=0),
         "precision_macro": precision_score(y_true, y_pred, average="macro", labels=labels, zero_division=0),
         "recall_macro": recall_score(y_true, y_pred, average="macro", labels=labels, zero_division=0),
         "confusion_matrix": confusion_matrix(y_true, y_pred, labels=labels).tolist(),
@@ -348,6 +351,147 @@ def plot_confusion_matrix(
     print(f"Confusion matrix saved to: {save_path}")
 
 
+def plot_per_class_metrics(
+    report: Dict,
+    save_path: Path,
+    title: str = "Per-Class Performance Metrics",
+) -> None:
+    """
+    Plot grouped bar chart showing Precision, Recall, F1-Score, and F2-Score for each class.
+
+    Args:
+        report: Dictionary from sklearn's classification_report (output_dict=True)
+        save_path: Path to save figure
+        title: Plot title
+    """
+    import pandas as pd
+    from sklearn.metrics import fbeta_score
+
+    sns.set_theme(style="whitegrid")
+
+    # Filter out summary keys, keep only class metrics
+    summary_keys = {'accuracy', 'macro avg', 'weighted avg'}
+    class_data = []
+
+    for class_name, metrics in report.items():
+        if class_name not in summary_keys and isinstance(metrics, dict):
+            # Calculate F2-Score per class from precision and recall
+            precision = metrics.get('precision', 0)
+            recall = metrics.get('recall', 0)
+            # F2 = (1 + beta^2) * (precision * recall) / (beta^2 * precision + recall)
+            beta = 2
+            if precision + recall > 0:
+                f2_score = (1 + beta**2) * (precision * recall) / (beta**2 * precision + recall)
+            else:
+                f2_score = 0.0
+
+            class_data.append({
+                'Class': class_name,
+                'Precision': precision,
+                'Recall': recall,
+                'F1-Score': metrics.get('f1-score', 0),
+                'F2-Score': f2_score,
+            })
+
+    if not class_data:
+        print(f"Warning: No class data found in report, skipping per-class plot.")
+        return
+
+    # Convert to long-form DataFrame for seaborn
+    df = pd.DataFrame(class_data)
+    df_long = pd.melt(
+        df,
+        id_vars=['Class'],
+        value_vars=['Precision', 'Recall', 'F1-Score', 'F2-Score'],
+        var_name='Metric',
+        value_name='Score'
+    )
+
+    # Create the grouped bar chart
+    plt.figure(figsize=(12, 6))
+    ax = sns.barplot(
+        data=df_long,
+        x='Class',
+        y='Score',
+        hue='Metric',
+        palette='Set2'
+    )
+
+    # Add value labels on top of bars
+    for container in ax.containers:
+        ax.bar_label(container, fmt='%.2f', fontsize=8, padding=3)
+
+    plt.ylim(0, 1.15)  # Leave room for labels
+    plt.xlabel('Class', fontsize=12)
+    plt.ylabel('Score', fontsize=12)
+    plt.title(title, fontsize=14, fontweight='bold')
+    plt.legend(title='Metric', loc='upper right')
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150)
+    plt.close()
+
+    print(f"Per-class metrics plot saved to: {save_path}")
+
+
+def plot_overall_metrics(
+    metrics: Dict,
+    save_path: Path,
+    title: str = "Overall Performance Metrics",
+) -> None:
+    """
+    Plot bar chart showing overall performance metrics (Accuracy, Precision, Recall, F1, F2).
+
+    Args:
+        metrics: Dictionary containing 'accuracy', 'precision_macro', 'recall_macro', 'f1_macro', 'f2_macro'
+        save_path: Path to save figure
+        title: Plot title
+    """
+    import pandas as pd
+
+    sns.set_theme(style="whitegrid")
+
+    # Extract overall metrics (including F2-Score)
+    overall_data = {
+        'Accuracy': metrics.get('accuracy', 0),
+        'Precision (Macro)': metrics.get('precision_macro', 0),
+        'Recall (Macro)': metrics.get('recall_macro', 0),
+        'F1-Score (Macro)': metrics.get('f1_macro', 0),
+        'F2-Score (Macro)': metrics.get('f2_macro', 0),
+    }
+
+    # Create DataFrame
+    df = pd.DataFrame({
+        'Metric': list(overall_data.keys()),
+        'Score': list(overall_data.values())
+    })
+
+    # Create the bar chart
+    plt.figure(figsize=(10, 6))
+    ax = sns.barplot(
+        data=df,
+        x='Metric',
+        y='Score',
+        palette='viridis',
+        hue='Metric',
+        legend=False
+    )
+
+    # Add value labels on top of bars
+    for container in ax.containers:
+        ax.bar_label(container, fmt='%.3f', fontsize=10, padding=3)
+
+    plt.ylim(0, 1.15)  # Leave room for labels
+    plt.xlabel('Metric', fontsize=12)
+    plt.ylabel('Score', fontsize=12)
+    plt.title(title, fontsize=14, fontweight='bold')
+    plt.xticks(rotation=15, ha='right')
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150)
+    plt.close()
+
+    print(f"Overall metrics plot saved to: {save_path}")
+
+
 def evaluate(args: argparse.Namespace) -> Dict:
     """
     Main evaluation function.
@@ -375,7 +519,11 @@ def evaluate(args: argparse.Namespace) -> Dict:
 
     print(f"Loaded checkpoint: {checkpoint_path}")
     print(f"Task: {task}, Model: {model_name}")
-    print(f"Checkpoint epoch: {checkpoint['epoch']}, Val Acc: {checkpoint['val_acc']:.2f}%")
+    # Handle both old (val_acc only) and new (val_f2) checkpoint formats
+    if "val_f2" in checkpoint:
+        print(f"Checkpoint epoch: {checkpoint['epoch']}, Val F2: {checkpoint['val_f2']:.4f}, Val Acc: {checkpoint['val_acc']:.2f}%")
+    else:
+        print(f"Checkpoint epoch: {checkpoint['epoch']}, Val Acc: {checkpoint['val_acc']:.2f}%")
 
     # Resolve data mode
     mode_config = DATA_MODE_CONFIG[args.data_mode]
@@ -442,6 +590,7 @@ def evaluate(args: argparse.Namespace) -> Dict:
     print(f"Evaluation Results ({level}-level)")
     print(f"{'='*60}")
     print(f"Accuracy:        {metrics['accuracy']:.4f}")
+    print(f"Macro F2-Score:  {metrics['f2_macro']:.4f}  <-- Primary Metric")
     print(f"Macro F1-Score:  {metrics['f1_macro']:.4f}")
     print(f"Macro Precision: {metrics['precision_macro']:.4f}")
     print(f"Macro Recall:    {metrics['recall_macro']:.4f}")
@@ -487,6 +636,20 @@ def evaluate(args: argparse.Namespace) -> Dict:
     plot_confusion_matrix(y_true, y_pred, class_names, cm_path, cm_title)
 
     # Plot per-class detailed metrics (Precision, Recall, F1-Score)
+    per_class_title = f"Per-Class Performance ({task}, {args.data_mode})"
+    if args.data_mode == "patch":
+        per_class_title += f" - {args.aggregation} aggregation"
+    per_class_path = exp_figures_dir / f"{report_name}_per_class_detailed.png"
+    plot_per_class_metrics(metrics["classification_report"], per_class_path, per_class_title)
+
+    # Plot overall metrics
+    overall_title = f"Overall Performance ({task}, {args.data_mode})"
+    if args.data_mode == "patch":
+        overall_title += f" - {args.aggregation} aggregation"
+    overall_path = exp_figures_dir / f"{report_name}_overall_metrics.png"
+    plot_overall_metrics(metrics, overall_path, overall_title)
+
+    return results
 
 
 def main() -> None:

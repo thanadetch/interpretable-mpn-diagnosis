@@ -10,7 +10,6 @@ from typing import List, Tuple
 
 import numpy as np
 import torch
-from sklearn.model_selection import train_test_split
 
 from config import (
     DATA_MODE_CONFIG,
@@ -166,6 +165,9 @@ def get_patient_split(
     This function ensures that all patches from the same patient
     are in the same subset (train/val/test).
 
+    For small imbalanced datasets, uses Manual Patient Stratification to ensure
+    every class has at least one sample in the test set.
+
     Args:
         task: Either 'classification' or 'grading'
         data_dir: Root data directory containing class folders (default: from config)
@@ -195,50 +197,66 @@ def get_patient_split(
     if len(patient_folders) == 0:
         raise ValueError(f"No valid patient folders found for task: {task}")
 
-    # Extract paths and labels for stratification
-    folders = [pf[0] for pf in patient_folders]
-    labels = [pf[1] for pf in patient_folders]
+    # Set random seed for reproducibility
+    random.seed(seed)
 
-    # First split: train vs (val + test)
-    val_test_ratio = val_ratio + test_ratio
+    # Group patients by class/grade for manual stratification
+    from collections import defaultdict
+    patients_by_class: dict = defaultdict(list)
+    for folder, label in patient_folders:
+        patients_by_class[label].append(folder)
 
-    try:
-        # Attempt stratified split
-        train_folders, val_test_folders, train_labels, val_test_labels = train_test_split(
-            folders,
-            labels,
-            test_size=val_test_ratio,
-            random_state=seed,
-            stratify=labels,
-        )
-    except ValueError:
-        # Fall back to non-stratified split if classes are too small
-        print("Warning: Could not perform stratified split. Using random split.")
-        train_folders, val_test_folders, train_labels, val_test_labels = train_test_split(
-            folders,
-            labels,
-            test_size=val_test_ratio,
-            random_state=seed,
-        )
+    # Determine number of classes
+    num_classes = max(patients_by_class.keys()) + 1
 
-    # Second split: val vs test
-    relative_test_ratio = test_ratio / val_test_ratio
+    # Manual Patient Stratification for small imbalanced datasets
+    train_folders: List[Path] = []
+    val_folders: List[Path] = []
+    test_folders: List[Path] = []
 
-    try:
-        val_folders, test_folders, _, _ = train_test_split(
-            val_test_folders,
-            val_test_labels,
-            test_size=relative_test_ratio,
-            random_state=seed,
-            stratify=val_test_labels,
-        )
-    except ValueError:
-        val_folders, test_folders, _, _ = train_test_split(
-            val_test_folders,
-            val_test_labels,
-            test_size=relative_test_ratio,
-            random_state=seed,
-        )
+    for label in range(num_classes):
+        class_patients = patients_by_class.get(label, [])
+        n_patients = len(class_patients)
+
+        if n_patients == 0:
+            continue
+
+        # Shuffle patients for this class
+        shuffled = class_patients.copy()
+        random.shuffle(shuffled)
+
+        if n_patients == 1:
+            # Only 1 patient: put in train (can't have in test without train data)
+            train_folders.extend(shuffled)
+            print(f"Warning: Class {label} has only 1 patient. Assigned to train only.")
+        elif n_patients == 2:
+            # 2 patients: 1 train, 1 test (skip val)
+            train_folders.append(shuffled[0])
+            test_folders.append(shuffled[1])
+            print(f"Warning: Class {label} has only 2 patients. Split: 1 train, 1 test (no val).")
+        elif n_patients < 5:
+            # 3-4 patients: ensure at least 1 in each split
+            # Priority: test (for evaluation), train (for learning), val (for tuning)
+            test_folders.append(shuffled[0])
+            train_folders.append(shuffled[1])
+            if n_patients >= 3:
+                val_folders.append(shuffled[2])
+            if n_patients >= 4:
+                train_folders.append(shuffled[3])
+        else:
+            # 5+ patients: use ratio-based split
+            n_test = max(1, int(n_patients * test_ratio))
+            n_val = max(1, int(n_patients * val_ratio))
+            n_train = n_patients - n_test - n_val
+
+            # Ensure at least 1 in train
+            if n_train < 1:
+                n_train = 1
+                n_val = max(0, n_patients - n_test - n_train)
+
+            test_folders.extend(shuffled[:n_test])
+            val_folders.extend(shuffled[n_test:n_test + n_val])
+            train_folders.extend(shuffled[n_test + n_val:])
 
     # Convert folders to file paths
     def folders_to_files(folder_list: List[Path]) -> List[Tuple[Path, int]]:
@@ -271,6 +289,12 @@ def get_patient_split(
     print(f"Train patients: {len(train_folders)} | Images: {len(train_files)}")
     print(f"Val patients:   {len(val_folders)} | Images: {len(val_files)}")
     print(f"Test patients:  {len(test_folders)} | Images: {len(test_files)}")
+
+    # Print per-class distribution in test set
+    test_class_counts: dict = defaultdict(int)
+    for _, label in test_files:
+        test_class_counts[label] += 1
+    print(f"Test set class distribution: {dict(test_class_counts)}")
     print(f"{'='*60}\n")
 
     return train_files, val_files, test_files
@@ -302,6 +326,52 @@ def get_class_weights(
     sample_weights = [class_weights[label] for _, label in file_list]
 
     return torch.tensor(sample_weights, dtype=torch.float64)
+
+
+def get_loss_weights(
+    file_list: List[Tuple[Path, int]],
+    num_classes: int,
+) -> torch.FloatTensor:
+    """
+    Calculate per-class weights for CrossEntropyLoss to handle class imbalance.
+
+    Uses Square Root Smoothed inverse frequency weighting to avoid over-predicting
+    minority classes. Classes with fewer samples get higher weights, but the
+    difference is smoothed by taking the square root.
+
+    Args:
+        file_list: List of (file_path, label) tuples
+        num_classes: Number of classes
+
+    Returns:
+        FloatTensor of shape (num_classes,) with per-class weights
+    """
+    import math
+
+    # Count samples per class
+    class_counts = [0] * num_classes
+    for _, label in file_list:
+        class_counts[label] += 1
+
+    total_samples = sum(class_counts)
+
+    # Square Root Smoothed inverse frequency weights
+    # This reduces the aggressive penalty difference between minority/majority classes
+    class_weights = []
+    for count in class_counts:
+        if count > 0:
+            # Apply square root smoothing to reduce extreme weight differences
+            weight = math.sqrt(total_samples / (num_classes * count))
+        else:
+            weight = 0.0  # Zero weight for missing classes
+        class_weights.append(weight)
+
+    # Normalize weights to sum to num_classes (keeps loss scale stable)
+    weight_sum = sum(class_weights)
+    if weight_sum > 0:
+        class_weights = [w * num_classes / weight_sum for w in class_weights]
+
+    return torch.FloatTensor(class_weights)
 
 
 def get_num_classes(task: str) -> int:
