@@ -2,10 +2,12 @@
 Preprocessing script for MPN bone marrow images.
 Performs Sliding Window Patching to preserve high-resolution details.
 
+Images are padded with black pixels to ensure no part of the original
+image is discarded during patching.
+
 Usage:
     python src/preprocess.py
     python src/preprocess.py --patch_size 512 --step_size 256
-    python src/preprocess.py --skip_small  # Skip images smaller than patch_size
 """
 import argparse
 from pathlib import Path
@@ -37,11 +39,6 @@ def parse_args() -> argparse.Namespace:
         help="Step size for sliding window (default: 256 for 50%% overlap)",
     )
 
-    parser.add_argument(
-        "--skip_small",
-        action="store_true",
-        help="Skip images smaller than patch_size instead of padding",
-    )
 
     parser.add_argument(
         "--input_dir",
@@ -60,49 +57,87 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def pad_image(
+def calculate_padded_size(
+    original_size: int,
+    patch_size: int,
+    step_size: int,
+) -> int:
+    """
+    Calculate the padded size needed to ensure full coverage with sliding window.
+
+    The padded size ensures that the last patch captures the very last pixels
+    of the original image (no pixels are discarded).
+
+    Args:
+        original_size: Original dimension (width or height)
+        patch_size: Size of each patch
+        step_size: Step size for sliding window
+
+    Returns:
+        Padded size that allows complete coverage
+    """
+    if original_size <= patch_size:
+        # Image is smaller than patch, just need patch_size
+        return patch_size
+
+    # Calculate how many full steps we can take from position 0
+    # The last patch starts at position: start_pos, and ends at: start_pos + patch_size
+    # We need: start_pos + patch_size >= original_size for full coverage
+
+    # Number of steps needed (ceiling division)
+    # After n steps, last patch starts at n * step_size
+    # We need: n * step_size + patch_size >= original_size
+    # So: n >= (original_size - patch_size) / step_size
+    # n = ceil((original_size - patch_size) / step_size)
+
+    if original_size <= patch_size:
+        num_steps = 0
+    else:
+        num_steps = -(-((original_size - patch_size)) // step_size)  # Ceiling division
+
+    # The padded size should allow exactly num_steps + 1 patches
+    # Last patch starts at: num_steps * step_size
+    # Last patch ends at: num_steps * step_size + patch_size
+    padded_size = num_steps * step_size + patch_size
+
+    return padded_size
+
+
+def pad_image_for_patching(
     image: Image.Image,
-    target_size: int,
+    patch_size: int,
+    step_size: int,
 ) -> Image.Image:
     """
-    Pad image to at least target_size x target_size.
+    Pad image with black pixels to ensure complete coverage during patching.
 
-    Uses reflection padding to avoid border artifacts.
+    The sliding window will capture every pixel of the original image.
+    Padding is added to the right and bottom edges as needed.
 
     Args:
         image: PIL Image to pad
-        target_size: Minimum size for width and height
+        patch_size: Size of each patch
+        step_size: Step size for sliding window
 
     Returns:
-        Padded PIL Image
+        Padded PIL Image (or original if no padding needed)
     """
     width, height = image.size
 
-    if width >= target_size and height >= target_size:
+    # Calculate required padded dimensions
+    new_width = calculate_padded_size(width, patch_size, step_size)
+    new_height = calculate_padded_size(height, patch_size, step_size)
+
+    # Check if padding is needed
+    if new_width == width and new_height == height:
         return image
 
-    # Calculate padding needed
-    new_width = max(width, target_size)
-    new_height = max(height, target_size)
+    # Create new image with black background (0, 0, 0)
+    padded = Image.new("RGB", (new_width, new_height), (0, 0, 0))
 
-    # Create new image with padding (use edge color to minimize artifacts)
-    # We'll use reflection padding by mirroring the image
-    padded = Image.new(image.mode, (new_width, new_height))
-
-    # Paste original image at top-left
+    # Paste original image at top-left corner
     padded.paste(image, (0, 0))
 
-    # Fill right edge by mirroring
-    if new_width > width:
-        right_strip = image.crop((width - (new_width - width), 0, width, height))
-        right_strip = right_strip.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
-        padded.paste(right_strip, (width, 0))
-
-    # Fill bottom edge by mirroring
-    if new_height > height:
-        bottom_strip = padded.crop((0, height - (new_height - height), new_width, height))
-        bottom_strip = bottom_strip.transpose(Image.Transpose.FLIP_TOP_BOTTOM)
-        padded.paste(bottom_strip, (0, height))
 
     return padded
 
@@ -150,17 +185,18 @@ def process_image(
     output_dir: Path,
     patch_size: int,
     step_size: int,
-    skip_small: bool,
 ) -> int:
     """
-    Process a single image: extract patches and save them.
+    Process a single image: pad if needed, extract patches, and save them.
+
+    Images are padded with black pixels to ensure no part of the original
+    image is discarded during patching.
 
     Args:
         image_path: Path to input image
         output_dir: Directory to save patches
         patch_size: Size of each patch
         step_size: Step size for sliding window
-        skip_small: If True, skip images smaller than patch_size
 
     Returns:
         Number of patches extracted
@@ -172,16 +208,15 @@ def process_image(
         print(f"Warning: Could not load {image_path}: {e}")
         return 0
 
-    width, height = image.size
+    original_width, original_height = image.size
 
-    # Handle small images
-    if width < patch_size or height < patch_size:
-        if skip_small:
-            print(f"Skipping small image: {image_path} ({width}x{height})")
-            return 0
-        else:
-            # Pad the image
-            image = pad_image(image, patch_size)
+    # Pad image to ensure complete coverage (no pixels discarded)
+    image = pad_image_for_patching(image, patch_size, step_size)
+    padded_width, padded_height = image.size
+
+    # Log if padding was applied
+    if padded_width != original_width or padded_height != original_height:
+        pass  # Padding applied silently; can add logging if needed
 
     # Extract patches
     patches = extract_patches(image, patch_size, step_size)
@@ -211,7 +246,6 @@ def process_dataset(
     output_dir: Path,
     patch_size: int,
     step_size: int,
-    skip_small: bool,
 ) -> dict:
     """
     Process entire dataset: extract patches from all images.
@@ -220,12 +254,13 @@ def process_dataset(
         Input:  data/raw/{Class}/{PatientID}/{ImageFile}.tif
         Output: data/processed/{Class}/{PatientID}/{ImageFile}_r{row}c{col}.png
 
+    All images are processed with padding to ensure complete coverage.
+
     Args:
         input_dir: Input directory (data/raw)
         output_dir: Output directory (data/processed)
         patch_size: Size of each patch
         step_size: Step size for sliding window
-        skip_small: If True, skip images smaller than patch_size
 
     Returns:
         Statistics dictionary
@@ -251,7 +286,7 @@ def process_dataset(
     print(f"Output directory: {output_dir}")
     print(f"Patch size:       {patch_size}x{patch_size}")
     print(f"Step size:        {step_size} ({100 * (patch_size - step_size) / patch_size:.0f}% overlap)")
-    print(f"Skip small:       {skip_small}")
+    print(f"Padding:          Black pixels (0,0,0) for complete coverage")
     print(f"{'='*60}\n")
 
     # Process each class
@@ -303,7 +338,6 @@ def process_dataset(
                     output_dir=patient_output_dir,
                     patch_size=patch_size,
                     step_size=step_size,
-                    skip_small=skip_small,
                 )
 
                 if num_patches == 0:
@@ -362,7 +396,6 @@ def main() -> None:
         output_dir=output_dir,
         patch_size=args.patch_size,
         step_size=args.step_size,
-        skip_small=args.skip_small,
     )
 
     # Print statistics
