@@ -78,8 +78,8 @@ def parse_args() -> argparse.Namespace:
         "--aggregation",
         type=str,
         default="mean",
-        choices=["vote", "mean", "max"],
-        help="Aggregation strategy for patch mode: 'vote', 'mean', or 'max' (default: mean)",
+        choices=["vote", "mean", "max", "clinical"],
+        help="Aggregation strategy for patch mode: 'vote', 'mean', 'max', or 'clinical' (default: mean)",
     )
 
     parser.add_argument(
@@ -273,6 +273,35 @@ def aggregate_predictions(
             max_conf_idx = np.argmax(np.max(probs, axis=1))
             aggregated_preds[group_key] = preds[max_conf_idx]
             aggregated_probs[group_key] = probs[max_conf_idx]
+
+        elif aggregation == "clinical":
+            # Clinical grading rules for fibrosis
+            # Priority check: G3 -> G2 -> G1 -> G0 with BALANCED thresholds
+            counts = np.bincount(preds, minlength=4)  # Ensure we cover G0-G3
+            total = len(preds)
+            ratios = counts / total
+
+            # Uniform Threshold (30% as requested)
+            threshold = 0.30
+
+            # 1. G3: Is G3 >= 30%?
+            if ratios[3] >= threshold:
+                aggregated_preds[group_key] = 3
+
+            # 2. G2: Is G2 >= 30%? (Checked only if G3 < 30%)
+            elif ratios[2] >= threshold:
+                aggregated_preds[group_key] = 2
+
+            # 3. G1: Is G1 >= 30%? (Checked only if G3 and G2 < 30%)
+            elif ratios[1] >= threshold:
+                aggregated_preds[group_key] = 1
+
+            # 4. Fallback: G0 (Normal)
+            else:
+                aggregated_preds[group_key] = 0
+
+            # Use mean probability for reporting
+            aggregated_probs[group_key] = np.mean(probs, axis=0)
 
     return aggregated_preds, aggregated_labels, aggregated_probs
 

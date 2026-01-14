@@ -337,7 +337,7 @@ def train(
         file_ext=file_ext,
     )
 
-    # Get train_files for loss weight calculation (Double Force strategy)
+    # Get train_files for class weight calculation (WeightedRandomSampler)
     train_files, _, _ = get_patient_split(
         args.task, data_dir=data_dir, file_ext=file_ext, seed=args.seed
     )
@@ -352,7 +352,7 @@ def train(
         class_names = ["G0", "G1", "G2", "G3"]
 
     print(f"\n{'='*60}")
-    print(f"Class Weights for Loss Function (Double Force Strategy)")
+    print(f"Class Weights for Loss Function (Hybrid Strategy)")
     print(f"{'='*60}")
     for i, (name, weight) in enumerate(zip(class_names, loss_weights.tolist())):
         print(f"  {name}: {weight:.4f}")
@@ -362,8 +362,12 @@ def train(
     model = get_model(args.model, num_classes, device)
     print_model_summary(model, args.model)
 
-    # Loss function with class weights and optimizer
+    # Restore Class Weights for Loss (Hybrid: Sampler + Loss Weights for G3 recovery)
     criterion = nn.CrossEntropyLoss(weight=loss_weights)
+
+    # Optimizer trains all model parameters
+    print(f"\n[*] Total parameters: {sum(p.numel() for p in model.parameters()):,}")
+
     optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=0.01)
     scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=1e-6)
 
