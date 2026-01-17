@@ -54,6 +54,14 @@ def parse_args() -> argparse.Namespace:
         help=f"Output directory (default: {PROCESSED_DATA_DIR})",
     )
 
+    parser.add_argument(
+        "--stain",
+        type=str,
+        default="all",
+        choices=["all", "reti", "he"],
+        help="Filter by stain type: 'reti' (grading), 'he' (classification), or 'all'",
+    )
+
     return parser.parse_args()
 
 
@@ -246,6 +254,7 @@ def process_dataset(
     output_dir: Path,
     patch_size: int,
     step_size: int,
+    stain: str = "all",
 ) -> dict:
     """
     Process entire dataset: extract patches from all images.
@@ -287,6 +296,7 @@ def process_dataset(
     print(f"Patch size:       {patch_size}x{patch_size}")
     print(f"Step size:        {step_size} ({100 * (patch_size - step_size) / patch_size:.0f}% overlap)")
     print(f"Padding:          Black pixels (0,0,0) for complete coverage")
+    print(f"Stain filter:     {stain}")
     print(f"{'='*60}\n")
 
     # Process each class
@@ -318,10 +328,22 @@ def process_dataset(
                 continue
 
             # Find all images in patient directory
-            image_files = [
+            all_files = [
                 f for f in patient_dir.iterdir()
                 if f.is_file() and f.suffix.lower() in IMAGE_EXTENSIONS
             ]
+
+            # Filter by stain
+            image_files = []
+            for f in all_files:
+                is_reti = "reti" in f.name.lower()
+                
+                if stain == "reti" and is_reti:
+                    image_files.append(f)
+                elif stain == "he" and not is_reti:
+                    image_files.append(f)
+                elif stain == "all":
+                    image_files.append(f)
 
             # Process each image
             for image_path in image_files:
@@ -396,6 +418,7 @@ def main() -> None:
         output_dir=output_dir,
         patch_size=args.patch_size,
         step_size=args.step_size,
+        stain=args.stain,
     )
 
     # Print statistics

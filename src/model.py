@@ -1,6 +1,6 @@
 """
 Model factory for MPN Classification and Fibrosis Grading.
-Supports ResNet18 and EfficientNet-B0 with pretrained ImageNet weights.
+Supports ResNet18, EfficientNet-B0, and DenseNet121 with pretrained ImageNet weights.
 """
 import torch
 import torch.nn as nn
@@ -45,10 +45,18 @@ def get_model(
             nn.Linear(in_features, num_classes),
         )
 
+    elif model_name == "densenet121":
+        # Load pretrained DenseNet121 - better for texture/fiber detection
+        model = models.densenet121(weights=models.DenseNet121_Weights.IMAGENET1K_V1)
+
+        # DenseNet uses a single Linear layer as classifier
+        in_features = model.classifier.in_features
+        model.classifier = nn.Linear(in_features, num_classes)
+
     else:
         raise ValueError(
             f"Unsupported model: {model_name}. "
-            f"Choose from: 'resnet18', 'efficientnet_b0'"
+            f"Choose from: 'resnet18', 'efficientnet_b0', 'densenet121'"
         )
 
     # Move model to device
@@ -74,6 +82,9 @@ def get_target_layer(model: nn.Module, model_name: str):
     elif model_name == "efficientnet_b0":
         # Last convolutional layer in EfficientNet
         return model.features[-1]
+    elif model_name == "densenet121":
+        # Last DenseBlock in DenseNet (features.denseblock4)
+        return model.features.denseblock4
     else:
         raise ValueError(f"Unsupported model for Grad-CAM: {model_name}")
 

@@ -12,7 +12,9 @@ PROJECT_ROOT: Path = Path(__file__).parent.parent.resolve()
 # Data directories
 RAW_DATA_DIR: Path = PROJECT_ROOT / "data" / "raw"
 PROCESSED_DATA_DIR: Path = PROJECT_ROOT / "data" / "processed"
-
+PROCESSED_GRADING_DIR: Path = PROJECT_ROOT / "data" / "processed_grading"
+PROCESSED_GRADING_CLEAN_DIR: Path = PROJECT_ROOT / "data" / "processed_grading_clean"
+PROCESSED_SUBTYPE_DIR: Path = PROJECT_ROOT / "data" / "processed_subtype"
 # Other directories
 EXPERIMENTS_DIR: Path = PROJECT_ROOT / "experiments"
 RESULTS_DIR: Path = PROJECT_ROOT / "results"
@@ -27,11 +29,31 @@ DATA_MODE_CONFIG: Dict[str, Dict[str, any]] = {
         "data_dir": RAW_DATA_DIR,
         "extension": "tif",
         "description": "Load raw .tif images and resize to 224x224",
+        "is_patch": False,
     },
     "patch": {
         "data_dir": PROCESSED_DATA_DIR,
         "extension": "png",
         "description": "Load preprocessed 512x512 .png patches",
+        "is_patch": True,
+    },
+    "grading_patch": {
+        "data_dir": PROCESSED_GRADING_DIR,
+        "extension": "png",
+        "description": "Fine-Grained 224x224 (Sharp Texture)",
+        "is_patch": True,
+    },
+    "subtype_patch": {
+        "data_dir": PROCESSED_SUBTYPE_DIR,
+        "extension": "png",
+        "description": "Coarse 512x512 (Cellular Context)",
+        "is_patch": True,
+    },
+    "grading_patch_clean": {
+        "data_dir": PROCESSED_GRADING_CLEAN_DIR,
+        "extension": "png",
+        "description": "Cleaned grading patches",
+        "is_patch": True,
     },
 }
 
@@ -58,8 +80,8 @@ TEST_RATIO: float = 0.15
 # ============================================================================
 # Classification Task: MPN Subtype (H&E Images)
 CLASS_MAP: Dict[str, int] = {
-    "ET": 0,   # Essential Thrombocythemia
-    "PV": 1,   # Polycythemia Vera
+    "ET": 0,  # Essential Thrombocythemia
+    "PV": 1,  # Polycythemia Vera
     "PMF": 2,  # Primary Myelofibrosis
 }
 
@@ -84,5 +106,4 @@ IMAGE_EXTENSIONS: tuple = (".tif", ".tiff", ".png", ".jpg", ".jpeg")
 # ============================================================================
 # Model Configuration
 # ============================================================================
-SUPPORTED_MODELS: tuple = ("resnet18", "efficientnet_b0")
-
+SUPPORTED_MODELS: tuple = ("resnet18", "efficientnet_b0", "densenet121")

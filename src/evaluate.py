@@ -589,7 +589,9 @@ def evaluate(args: argparse.Namespace) -> Dict:
         class_names = list(GRADE_MAP_INV.values())
 
     # Compute metrics based on data mode
-    if args.data_mode == "patch":
+    is_patch_mode = DATA_MODE_CONFIG[args.data_mode]["is_patch"]
+
+    if is_patch_mode:
         print(f"\nAggregation strategy: {args.aggregation}")
         print(f"Aggregation level: {args.level}")
 
@@ -645,7 +647,7 @@ def evaluate(args: argparse.Namespace) -> Dict:
         "task": task,
         "model": model_name,
         "data_mode": args.data_mode,
-        "aggregation": args.aggregation if args.data_mode == "patch" else None,
+        "aggregation": args.aggregation if is_patch_mode else None,
         "level": level,
         "num_samples": len(y_true),
         "metrics": metrics,
@@ -658,7 +660,7 @@ def evaluate(args: argparse.Namespace) -> Dict:
 
     # Plot confusion matrix
     cm_title = f"Confusion Matrix ({task}, {args.data_mode})"
-    if args.data_mode == "patch":
+    if is_patch_mode:
         cm_title += f" - {args.aggregation} aggregation"
 
     cm_path = exp_figures_dir / f"{report_name}_confusion_matrix.png"
@@ -666,14 +668,14 @@ def evaluate(args: argparse.Namespace) -> Dict:
 
     # Plot per-class detailed metrics (Precision, Recall, F1-Score)
     per_class_title = f"Per-Class Performance ({task}, {args.data_mode})"
-    if args.data_mode == "patch":
+    if is_patch_mode:
         per_class_title += f" - {args.aggregation} aggregation"
     per_class_path = exp_figures_dir / f"{report_name}_per_class_detailed.png"
     plot_per_class_metrics(metrics["classification_report"], per_class_path, per_class_title)
 
     # Plot overall metrics
     overall_title = f"Overall Performance ({task}, {args.data_mode})"
-    if args.data_mode == "patch":
+    if is_patch_mode:
         overall_title += f" - {args.aggregation} aggregation"
     overall_path = exp_figures_dir / f"{report_name}_overall_metrics.png"
     plot_overall_metrics(metrics, overall_path, overall_title)

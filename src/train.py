@@ -10,6 +10,8 @@ from typing import Dict, List, Tuple
 
 import torch
 import torch.nn as nn
+import torch.nn.utils as utils
+from torch.cuda.amp import autocast, GradScaler
 from sklearn.metrics import fbeta_score
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
@@ -185,6 +187,7 @@ def train_one_epoch(
     train_loader: DataLoader,
     criterion: nn.Module,
     optimizer: torch.optim.Optimizer,
+    scaler: GradScaler,
     device: torch.device,
 ) -> Tuple[float, float]:
     """
@@ -195,6 +198,7 @@ def train_one_epoch(
         train_loader: Training DataLoader
         criterion: Loss function
         optimizer: Optimizer
+        scaler: Gradient scaler for AMP
         device: Device to train on
 
     Returns:
@@ -214,12 +218,17 @@ def train_one_epoch(
 
         # Forward pass
         optimizer.zero_grad()
-        outputs = model(images)
-        loss = criterion(outputs, labels)
+        
+        with autocast():
+            outputs = model(images)
+            loss = criterion(outputs, labels)
 
         # Backward pass
-        loss.backward()
-        optimizer.step()
+        scaler.scale(loss).backward()
+        scaler.unscale_(optimizer)
+        utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        scaler.step(optimizer)
+        scaler.update()
 
         # Statistics
         running_loss += loss.item() * images.size(0)
@@ -391,6 +400,8 @@ def train(
         "val_f2": [],
     }
 
+    scaler = GradScaler()
+
     print(f"\n{'='*60}")
     print(f"Starting training: {args.task} with {args.model}")
     print(f"Model selection metric: F2-Score (Macro, beta=2)")
@@ -401,7 +412,7 @@ def train(
 
         # Train
         train_loss, train_acc = train_one_epoch(
-            model, train_loader, criterion, optimizer, device
+            model, train_loader, criterion, optimizer, scaler, device
         )
 
         # Validate (now returns F2-Score as well)
@@ -482,4 +493,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

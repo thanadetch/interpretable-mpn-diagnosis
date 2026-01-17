@@ -10,3 +10,5 @@ gen
 data
 results
 experiments
+.DS_Store
+__pycache__
