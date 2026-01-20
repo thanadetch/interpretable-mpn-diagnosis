@@ -1,15 +1,19 @@
 """
-Run Janitor Model: Clean the dataset by quarantining bone artifact patches.
+Run Janitor Model: Clean the dataset by quarantining artifact patches.
 
-This script uses the trained Janitor model to filter out cortical bone patches
-from the main grading dataset, keeping only valid bone marrow ROI patches.
+This script uses the trained Janitor model to filter out artifact patches
+from datasets, keeping only valid patches for downstream tasks.
+
+Supported Tasks:
+    - grading: Filter out bone patches from Reticulin-stained images
+    - subtype: Filter out artifact patches from H&E-stained images
 
 Usage:
-    python src/run_janitor.py --threshold 0.90
-    python src/run_janitor.py --input_dir data/processed_grading --threshold 0.85
+    python src/run_janitor.py --task grading --threshold 0.90
+    python src/run_janitor.py --task subtype --input_dir data/processed_subtype --threshold 0.85
 
 Output:
-    Bone patches are MOVED to data/quarantine_janitor/ preserving folder structure.
+    Artifact patches are MOVED to quarantine directory preserving folder structure.
 """
 import argparse
 import shutil
@@ -25,11 +29,24 @@ from tqdm import tqdm
 from config import EXPERIMENTS_DIR, PROCESSED_GRADING_DIR, PROJECT_ROOT
 
 # ============================================================================
-# Configuration
+# Task-Specific Configuration
 # ============================================================================
-JANITOR_MODEL_PATH: Path = EXPERIMENTS_DIR / "janitor_model.pth"
-QUARANTINE_DIR: Path = PROJECT_ROOT / "data" / "quarantine_janitor"
-JANITOR_CLASSES = ["bone", "marrow"]  # Index 0 = bone, Index 1 = marrow
+TASK_CONFIG = {
+    "grading": {
+        "model_path": EXPERIMENTS_DIR / "janitor_model_grading.pth",
+        "quarantine_dir": PROJECT_ROOT / "data" / "quarantine_janitor_grading",
+        "classes": ["bone", "marrow"],
+        "artifact_class": 0,  # Index 0 = bone (artifact to filter)
+        "description": "Bone vs Marrow Classifier (Reticulin)",
+    },
+    "subtype": {
+        "model_path": EXPERIMENTS_DIR / "janitor_model_subtype.pth",
+        "quarantine_dir": PROJECT_ROOT / "data" / "quarantine_janitor_subtype",
+        "classes": ["artifact", "tissue"],
+        "artifact_class": 0,  # Index 0 = artifact (to filter)
+        "description": "Artifact vs Tissue Classifier (H&E)",
+    },
+}
 
 
 def get_device() -> torch.device:
@@ -41,13 +58,14 @@ def get_device() -> torch.device:
     return torch.device("cpu")
 
 
-def load_janitor_model(model_path: Path, device: torch.device) -> nn.Module:
+def load_janitor_model(model_path: Path, device: torch.device, task: str) -> nn.Module:
     """
     Load the trained Janitor model.
 
     Args:
         model_path: Path to the saved model checkpoint
         device: Device to load model on
+        task: Task name for error message
 
     Returns:
         Loaded model in eval mode
@@ -56,7 +74,7 @@ def load_janitor_model(model_path: Path, device: torch.device) -> nn.Module:
         raise FileNotFoundError(
             f"Janitor model not found at: {model_path}\n"
             f"Please train the Janitor model first using:\n"
-            f"  python src/train_janitor.py --epochs 10"
+            f"  python src/train_janitor.py --task {task} --epochs 10"
         )
 
     # Create model architecture
@@ -70,6 +88,7 @@ def load_janitor_model(model_path: Path, device: torch.device) -> nn.Module:
     model.eval()
 
     print(f"Loaded Janitor model from: {model_path}")
+    print(f"  - Task: {checkpoint.get('task', 'unknown')}")
     print(f"  - Trained for {checkpoint['epoch']} epochs")
     print(f"  - Validation Accuracy: {checkpoint['val_acc']:.2f}%")
 
@@ -95,7 +114,7 @@ def predict_single_image(
     device: torch.device,
 ) -> tuple:
     """
-    Predict if an image is bone or marrow.
+    Predict if an image is an artifact or valid tissue.
 
     Args:
         model: Janitor model
@@ -104,8 +123,8 @@ def predict_single_image(
         device: Device for inference
 
     Returns:
-        Tuple of (predicted_class, bone_probability)
-        predicted_class: 0 = bone, 1 = marrow
+        Tuple of (predicted_class, artifact_probability)
+        predicted_class: 0 = artifact, 1 = valid
     """
     image = Image.open(image_path).convert("RGB")
     image_tensor = transform(image).unsqueeze(0).to(device)
@@ -113,19 +132,27 @@ def predict_single_image(
     with torch.no_grad():
         outputs = model(image_tensor)
         probabilities = F.softmax(outputs, dim=1)
-        bone_prob = probabilities[0, 0].item()  # Index 0 = bone
+        artifact_prob = probabilities[0, 0].item()  # Index 0 = artifact
         predicted_class = outputs.argmax(dim=1).item()
 
-    return predicted_class, bone_prob
+    return predicted_class, artifact_prob
 
 
 def run_janitor(args: argparse.Namespace) -> None:
     """Main function to clean the dataset using the Janitor model."""
+    # Get task-specific configuration
+    task_config = TASK_CONFIG[args.task]
+    model_path = task_config["model_path"]
+    quarantine_dir = task_config["quarantine_dir"]
+    artifact_class = task_config["artifact_class"]
+    task_description = task_config["description"]
+    classes = task_config["classes"]
+
     device = get_device()
     print(f"Using device: {device}")
 
     # Load model
-    model = load_janitor_model(JANITOR_MODEL_PATH, device)
+    model = load_janitor_model(model_path, device, args.task)
     transform = get_inference_transform()
 
     # Input directory
@@ -137,12 +164,14 @@ def run_janitor(args: argparse.Namespace) -> None:
     all_patches = list(input_dir.rglob("*.png"))
 
     print(f"\n{'='*60}")
-    print("Janitor Model - Dataset Cleaning")
+    print(f"Janitor Model - Dataset Cleaning ({task_description})")
     print(f"{'='*60}")
+    print(f"Task: {args.task}")
     print(f"Input directory: {input_dir}")
     print(f"Total patches found: {len(all_patches)}")
-    print(f"Bone probability threshold: {args.threshold}")
-    print(f"Quarantine directory: {QUARANTINE_DIR}")
+    print(f"Artifact class: {classes[artifact_class]} (index {artifact_class})")
+    print(f"Artifact probability threshold: {args.threshold}")
+    print(f"Quarantine directory: {quarantine_dir}")
     print(f"{'='*60}\n")
 
     if len(all_patches) == 0:
@@ -150,41 +179,41 @@ def run_janitor(args: argparse.Namespace) -> None:
         return
 
     # Create quarantine directory
-    QUARANTINE_DIR.mkdir(parents=True, exist_ok=True)
+    quarantine_dir.mkdir(parents=True, exist_ok=True)
 
     # Process patches
-    bone_count = 0
-    marrow_count = 0
+    artifact_count = 0
+    valid_count = 0
     moved_files = []
 
     pbar = tqdm(all_patches, desc="Scanning patches", unit="patch")
     for patch_path in pbar:
-        predicted_class, bone_prob = predict_single_image(
+        predicted_class, artifact_prob = predict_single_image(
             model, patch_path, transform, device
         )
 
-        # If bone with high confidence, quarantine it
-        if predicted_class == 0 and bone_prob >= args.threshold:
-            bone_count += 1
+        # If artifact with high confidence, quarantine it
+        if predicted_class == artifact_class and artifact_prob >= args.threshold:
+            artifact_count += 1
 
             # Preserve relative folder structure
             relative_path = patch_path.relative_to(input_dir)
-            quarantine_path = QUARANTINE_DIR / relative_path
+            quarantine_path = quarantine_dir / relative_path
             quarantine_path.parent.mkdir(parents=True, exist_ok=True)
 
             # Move the file
             if not args.dry_run:
                 shutil.move(str(patch_path), str(quarantine_path))
-                moved_files.append((patch_path, quarantine_path, bone_prob))
+                moved_files.append((patch_path, quarantine_path, artifact_prob))
             else:
-                moved_files.append((patch_path, quarantine_path, bone_prob))
+                moved_files.append((patch_path, quarantine_path, artifact_prob))
         else:
-            marrow_count += 1
+            valid_count += 1
 
         pbar.set_postfix({
-            "bone": bone_count,
-            "marrow": marrow_count,
-            "last_prob": f"{bone_prob:.2f}"
+            "artifact": artifact_count,
+            "valid": valid_count,
+            "last_prob": f"{artifact_prob:.2f}"
         })
 
     # Summary
@@ -192,14 +221,14 @@ def run_janitor(args: argparse.Namespace) -> None:
     print("Janitor Cleaning Complete!")
     print(f"{'='*60}")
     print(f"Total patches scanned: {len(all_patches)}")
-    print(f"Bone artifacts detected: {bone_count} ({100*bone_count/len(all_patches):.1f}%)")
-    print(f"Valid marrow patches: {marrow_count} ({100*marrow_count/len(all_patches):.1f}%)")
+    print(f"Artifacts detected ({classes[artifact_class]}): {artifact_count} ({100*artifact_count/len(all_patches):.1f}%)")
+    print(f"Valid patches ({classes[1-artifact_class]}): {valid_count} ({100*valid_count/len(all_patches):.1f}%)")
 
     if args.dry_run:
         print(f"\n[DRY RUN] No files were actually moved.")
-        print(f"[DRY RUN] {bone_count} files would be quarantined.")
+        print(f"[DRY RUN] {artifact_count} files would be quarantined.")
     else:
-        print(f"\nMoved {bone_count} bone patches to: {QUARANTINE_DIR}")
+        print(f"\nMoved {artifact_count} artifact patches to: {quarantine_dir}")
 
     # Show some examples
     if moved_files and args.verbose:
@@ -213,7 +242,14 @@ def run_janitor(args: argparse.Namespace) -> None:
 def parse_args() -> argparse.Namespace:
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(
-        description="Run Janitor Model to clean dataset by quarantining bone patches"
+        description="Run Janitor Model to clean dataset by quarantining artifact patches"
+    )
+    parser.add_argument(
+        "--task",
+        type=str,
+        choices=["grading", "subtype"],
+        required=True,
+        help="Task to run: 'grading' (Bone vs Marrow) or 'subtype' (Artifact vs Tissue)"
     )
     parser.add_argument(
         "--input_dir",
@@ -225,7 +261,7 @@ def parse_args() -> argparse.Namespace:
         "--threshold",
         type=float,
         default=0.90,
-        help="Bone probability threshold for quarantine (default: 0.90)"
+        help="Artifact probability threshold for quarantine (default: 0.90)"
     )
     parser.add_argument(
         "--dry_run",
@@ -244,4 +280,3 @@ def parse_args() -> argparse.Namespace:
 if __name__ == "__main__":
     args = parse_args()
     run_janitor(args)
-

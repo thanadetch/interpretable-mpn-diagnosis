@@ -1,16 +1,27 @@
 """
-Train Janitor Model (Stage 1): Binary classifier to separate Bone vs Marrow patches.
+Train Janitor Model (Stage 1): Binary classifier for cleaning patches.
 
 This is part of the Two-Stage Cascaded Framework to fix shortcut learning.
-The Janitor model filters out cortical bone artifacts before fibrosis grading.
+The Janitor model filters out artifacts before downstream tasks.
+
+Supported Tasks:
+    - grading: Bone vs Marrow classification (Reticulin stain)
+    - subtype: Artifact vs Tissue classification (H&E stain)
 
 Usage:
-    python src/train_janitor.py --epochs 10 --batch_size 32
+    python src/train_janitor.py --task grading --epochs 10 --batch_size 32
+    python src/train_janitor.py --task subtype --epochs 10 --batch_size 32
 
 Dataset Structure Required:
-    data/janitor_train/
-    ├── bone/      # Cortical bone artifact patches
-    └── marrow/    # Valid bone marrow ROI patches
+    For grading (Reticulin):
+        data/janitor_train_grading/
+        ├── bone/      # Cortical bone artifact patches
+        └── marrow/    # Valid bone marrow ROI patches
+
+    For subtype (H&E):
+        data/janitor_train_subtype/
+        ├── artifact/  # Artifact patches (e.g., folds, tears, blur)
+        └── tissue/    # Valid tissue patches
 """
 import argparse
 import random
@@ -27,10 +38,22 @@ from tqdm import tqdm
 from config import EXPERIMENTS_DIR, PROJECT_ROOT, SEED
 
 # ============================================================================
-# Janitor-Specific Configuration
+# Task-Specific Configuration
 # ============================================================================
-JANITOR_DATA_DIR: Path = PROJECT_ROOT / "data" / "janitor_train"
-JANITOR_CLASSES = ["bone", "marrow"]  # Index 0 = bone, Index 1 = marrow
+TASK_CONFIG = {
+    "grading": {
+        "data_dir": PROJECT_ROOT / "data" / "janitor_train_grading",
+        "model_path": EXPERIMENTS_DIR / "janitor_model_grading.pth",
+        "classes": ["bone", "marrow"],
+        "description": "Bone vs Marrow Classifier (Reticulin)",
+    },
+    "subtype": {
+        "data_dir": PROJECT_ROOT / "data" / "janitor_train_subtype",
+        "model_path": EXPERIMENTS_DIR / "janitor_model_subtype.pth",
+        "classes": ["artifact", "tissue"],
+        "description": "Artifact vs Tissue Classifier (H&E)",
+    },
+}
 
 
 def set_seed(seed: int = SEED) -> None:
@@ -171,6 +194,13 @@ def train_janitor(args: argparse.Namespace) -> None:
     """Main training function for Janitor model."""
     set_seed(SEED)
 
+    # Get task-specific configuration
+    task_config = TASK_CONFIG[args.task]
+    data_dir = task_config["data_dir"]
+    output_path = task_config["model_path"]
+    janitor_classes = task_config["classes"]
+    task_description = task_config["description"]
+
     # Device setup
     if torch.cuda.is_available():
         device = torch.device("cuda")
@@ -181,12 +211,12 @@ def train_janitor(args: argparse.Namespace) -> None:
     print(f"Using device: {device}")
 
     # Check data directory exists
-    if not JANITOR_DATA_DIR.exists():
+    if not data_dir.exists():
         raise FileNotFoundError(
-            f"Janitor training data not found at: {JANITOR_DATA_DIR}\n"
+            f"Janitor training data not found at: {data_dir}\n"
             f"Please create the following structure:\n"
-            f"  {JANITOR_DATA_DIR}/bone/   (cortical bone patches)\n"
-            f"  {JANITOR_DATA_DIR}/marrow/ (bone marrow ROI patches)"
+            f"  {data_dir}/{janitor_classes[0]}/   (class 0 patches)\n"
+            f"  {data_dir}/{janitor_classes[1]}/ (class 1 patches)"
         )
 
     # Get transforms
@@ -195,14 +225,15 @@ def train_janitor(args: argparse.Namespace) -> None:
     # Load dataset using ImageFolder
     # Split into train/val (80/20)
     full_dataset = datasets.ImageFolder(
-        root=JANITOR_DATA_DIR,
+        root=data_dir,
         transform=data_transforms["train"]
     )
 
     print(f"\n{'='*60}")
-    print("Janitor Model Training (Bone vs Marrow Classifier)")
+    print(f"Janitor Model Training ({task_description})")
     print(f"{'='*60}")
-    print(f"Dataset: {JANITOR_DATA_DIR}")
+    print(f"Task: {args.task}")
+    print(f"Dataset: {data_dir}")
     print(f"Classes: {full_dataset.classes}")
     print(f"Total samples: {len(full_dataset)}")
 
@@ -255,7 +286,6 @@ def train_janitor(args: argparse.Namespace) -> None:
 
     # Training loop
     best_val_acc = 0.0
-    output_path = EXPERIMENTS_DIR / "janitor_model.pth"
 
     print(f"\nStarting training for {args.epochs} epochs...")
     print(f"Model will be saved to: {output_path}\n")
@@ -289,7 +319,8 @@ def train_janitor(args: argparse.Namespace) -> None:
                 "model_state_dict": model.state_dict(),
                 "optimizer_state_dict": optimizer.state_dict(),
                 "val_acc": val_acc,
-                "classes": JANITOR_CLASSES,
+                "task": args.task,
+                "classes": janitor_classes,
             }, output_path)
             print(f"  -> Best model saved! (Val Acc: {val_acc:.2f}%)")
 
@@ -305,7 +336,14 @@ def train_janitor(args: argparse.Namespace) -> None:
 def parse_args() -> argparse.Namespace:
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(
-        description="Train Janitor Model (Bone vs Marrow binary classifier)"
+        description="Train Janitor Model for cleaning patches (grading or subtype task)"
+    )
+    parser.add_argument(
+        "--task",
+        type=str,
+        choices=["grading", "subtype"],
+        required=True,
+        help="Task to train for: 'grading' (Bone vs Marrow) or 'subtype' (Artifact vs Tissue)"
     )
     parser.add_argument(
         "--epochs",

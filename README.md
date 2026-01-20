@@ -36,11 +36,14 @@
 `python src/evaluate.py --checkpoint experiments/grading_densenet121_grading_patch_20260117_075925/best_model.pth --data_mode patch --aggregation clinical --level image`
 `python src/evaluate.py --checkpoint experiments/grading_densenet121_grading_patch_clean_20260117_172917/best_model.pth --data_mode grading_patch_clean --aggregation clinical --level image`
 
+`python src/evaluate.py --checkpoint experiments/grading_densenet121_grading_patch_clean_20260120_143843/best_model.pth --data_mode grading_patch_clean --aggregation clinical --level image`
+
 `python src/explain.py --checkpoint experiments/grading_resnet18_patch_20260101_173308/best_model.pth --data_mode patch --num_samples 10`
 `python src/explain.py --checkpoint experiments/grading_resnet18_patch_20260108_234850/best_model.pth --data_mode patch --num_samples 10`
 `python src/explain.py --checkpoint experiments/grading_resnet18_patch_20260110_154314/best_model.pth --data_mode patch --num_samples 30`
 `python src/explain.py --checkpoint experiments/grading_densenet121_grading_patch_20260117_075925/best_model.pth --data_mode patch --num_samples 50`
 `python src/explain.py --checkpoint experiments/grading_densenet121_grading_patch_clean_20260117_172917/best_model.pth --data_mode grading_patch_clean --num_samples 50`
+`python src/explain.py --checkpoint experiments/grading_densenet121_grading_patch_clean_20260120_143843/best_model.pth --data_mode grading_patch_clean --num_samples 50`
 
 ### Resize Data Mode
 `python src/evaluate.py --checkpoint experiments/grading_resnet18_patch_20260108_101800/best_model.pth --data_mode resize`
@@ -52,3 +55,8 @@
 `python src/preprocess.py --patch_size 512 --step_size 256`
 `python src/preprocess.py --stain reti --patch_size 224 --step_size 112 --output_dir data/processed_grading`
 `python src/preprocess.py --stain he --patch_size 512 --step_size 256 --output_dir data/processed_subtype`
+
+`python src/run_janitor.py \
+    --task subtype \
+    --input_dir data/processed_subtype_clean \
+    --threshold 0.80`
