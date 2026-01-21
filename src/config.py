@@ -15,6 +15,7 @@ PROCESSED_DATA_DIR: Path = PROJECT_ROOT / "data" / "processed"
 PROCESSED_GRADING_DIR: Path = PROJECT_ROOT / "data" / "processed_grading"
 PROCESSED_GRADING_CLEAN_DIR: Path = PROJECT_ROOT / "data" / "processed_grading_clean"
 PROCESSED_SUBTYPE_DIR: Path = PROJECT_ROOT / "data" / "processed_subtype"
+PROCESSED_SUBTYPE_CLEAN_DIR: Path = PROJECT_ROOT / "data" / "processed_subtype_clean"
 # Other directories
 EXPERIMENTS_DIR: Path = PROJECT_ROOT / "experiments"
 RESULTS_DIR: Path = PROJECT_ROOT / "results"
@@ -53,6 +54,12 @@ DATA_MODE_CONFIG: Dict[str, Dict[str, any]] = {
         "data_dir": PROCESSED_GRADING_CLEAN_DIR,
         "extension": "png",
         "description": "Cleaned grading patches",
+        "is_patch": True,
+    },
+    "subtype_patch_clean": {
+        "data_dir": PROCESSED_SUBTYPE_CLEAN_DIR,
+        "extension": "png",
+        "description": "Cleaned subtype patches (H&E)",
         "is_patch": True,
     },
 }
