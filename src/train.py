@@ -33,7 +33,6 @@ from dataset import MPNDataset
 from model import get_model, print_model_summary
 from utils import (
     get_class_weights,
-    get_loss_weights,
     get_num_classes,
     get_patient_split,
     set_seed,
@@ -346,33 +345,12 @@ def train(
         file_ext=file_ext,
     )
 
-    # Get train_files for class weight calculation (WeightedRandomSampler)
-    train_files, _, _ = get_patient_split(
-        args.task, data_dir=data_dir, file_ext=file_ext, seed=args.seed
-    )
-
-    # Calculate per-class loss weights (inverse frequency, normalized)
-    loss_weights = get_loss_weights(train_files, num_classes).to(device)
-
-    # Print class weights for transparency
-    if args.task == "classification":
-        class_names = ["ET", "PV", "PMF"]
-    else:
-        class_names = ["G0", "G1", "G2", "G3"]
-
-    print(f"\n{'='*60}")
-    print(f"Class Weights for Loss Function (Hybrid Strategy)")
-    print(f"{'='*60}")
-    for i, (name, weight) in enumerate(zip(class_names, loss_weights.tolist())):
-        print(f"  {name}: {weight:.4f}")
-    print(f"{'='*60}")
-
     # Create model
     model = get_model(args.model, num_classes, device)
     print_model_summary(model, args.model)
 
-    # Restore Class Weights for Loss (Hybrid: Sampler + Loss Weights for G3 recovery)
-    criterion = nn.CrossEntropyLoss(weight=loss_weights)
+    # CrossEntropyLoss with label smoothing (class balance handled by WeightedRandomSampler)
+    criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
 
     # Optimizer trains all model parameters
     print(f"\n[*] Total parameters: {sum(p.numel() for p in model.parameters()):,}")
