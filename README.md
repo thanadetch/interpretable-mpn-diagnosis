@@ -68,3 +68,5 @@
     --task grading \
     --input_dir data/processed_grading_clean \
     --threshold 0.80`
+
+python tools/data_stats.py
