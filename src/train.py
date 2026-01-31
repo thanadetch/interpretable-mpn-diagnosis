@@ -11,7 +11,7 @@ from typing import Dict, List, Tuple
 import torch
 import torch.nn as nn
 import torch.nn.utils as utils
-from torch.cuda.amp import autocast, GradScaler
+from torch.amp import GradScaler
 from sklearn.metrics import fbeta_score
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
@@ -102,6 +102,20 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_DATA_MODE,
         choices=list(DATA_MODE_CONFIG.keys()),
         help="Data mode: 'resize' (raw .tif, resize to 224) or 'patch' (preprocessed .png patches)",
+    )
+
+    parser.add_argument(
+        "--postfix",
+        type=str,
+        default="",
+        help="Optional suffix to append to the experiment folder name (e.g., '_test01')",
+    )
+
+    parser.add_argument(
+        "--freeze_epochs",
+        type=int,
+        default=0,
+        help="Number of epochs to freeze backbone layers (0 = no freezing, standard fine-tuning)",
     )
 
     return parser.parse_args()
@@ -218,7 +232,7 @@ def train_one_epoch(
         # Forward pass
         optimizer.zero_grad()
         
-        with autocast():
+        with torch.amp.autocast(device_type=device.type):
             outputs = model(images)
             loss = criterion(outputs, labels)
 
@@ -352,15 +366,56 @@ def train(
     # CrossEntropyLoss with label smoothing (class balance handled by WeightedRandomSampler)
     criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
 
-    # Optimizer trains all model parameters
-    print(f"\n[*] Total parameters: {sum(p.numel() for p in model.parameters()):,}")
+    # === Freeze/Unfreeze based on --freeze_epochs ===
+    total_params = sum(p.numel() for p in model.parameters())
 
-    optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=0.01)
+    # Dynamically identify the classification head
+    if hasattr(model, "fc"):
+        # ResNet, ResNeXt, etc.
+        head = model.fc
+        head_name = "fc"
+    elif hasattr(model, "classifier"):
+        # EfficientNet, DenseNet, MobileNet, etc.
+        head = model.classifier
+        head_name = "classifier"
+    elif hasattr(model, "heads"):
+        # Vision Transformer (ViT)
+        head = model.heads
+        head_name = "heads"
+    else:
+        raise AttributeError(
+            f"Cannot identify classification head for model '{args.model}'. "
+            "Expected 'fc', 'classifier', or 'heads' attribute."
+        )
+
+    if args.freeze_epochs > 0:
+        # Freeze all backbone layers, keep head trainable
+        for param in model.parameters():
+            param.requires_grad = False
+        for param in head.parameters():
+            param.requires_grad = True
+
+        trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        print(f"\n[Frozen Mode] Training {head_name} layer only for {args.freeze_epochs} epochs")
+        print(f"[*] Total parameters: {total_params:,}")
+        print(f"[*] Trainable parameters: {trainable_params:,}")
+
+        # Optimizer for head parameters only
+        optimizer = AdamW(head.parameters(), lr=args.lr, weight_decay=0.01)
+    else:
+        # Standard fine-tuning: all layers trainable
+        print(f"\n[Unfrozen Mode] Standard fine-tuning (all layers trainable)")
+        print(f"[*] Total parameters: {total_params:,}")
+
+        optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=0.01)
+
     scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=1e-6)
 
     # Create experiment directory with data mode info
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     exp_name = f"{args.task}_{args.model}_{args.data_mode}_{timestamp}"
+    if args.postfix:
+        exp_name = f"{exp_name}{args.postfix}"
     exp_dir = EXPERIMENTS_DIR / exp_name
     exp_dir.mkdir(parents=True, exist_ok=True)
 
@@ -378,7 +433,7 @@ def train(
         "val_f2": [],
     }
 
-    scaler = GradScaler()
+    scaler = GradScaler(enabled=(device.type == "cuda"))
 
     print(f"\n{'='*60}")
     print(f"Starting training: {args.task} with {args.model}")
@@ -387,6 +442,26 @@ def train(
 
     for epoch in range(args.epochs):
         print(f"Epoch [{epoch + 1}/{args.epochs}]")
+
+        # === Unfreeze all layers after freeze_epochs ===
+        if args.freeze_epochs > 0 and epoch == args.freeze_epochs:
+            print(f"[Epoch {epoch + 1}] Unfreezing all layers")
+
+            # Unfreeze all parameters
+            for param in model.parameters():
+                param.requires_grad = True
+
+            trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+            print(f"[*] Trainable parameters: {trainable_params:,}")
+
+            # Re-initialize optimizer with all parameters and reduced learning rate
+            finetune_lr = args.lr * 0.1
+            print(f"[*] Fine-tuning learning rate: {finetune_lr}")
+            optimizer = AdamW(model.parameters(), lr=finetune_lr, weight_decay=0.01)
+
+            # Re-initialize scheduler for remaining epochs
+            remaining_epochs = args.epochs - epoch
+            scheduler = CosineAnnealingLR(optimizer, T_max=remaining_epochs, eta_min=1e-6)
 
         # Train
         train_loss, train_acc = train_one_epoch(
