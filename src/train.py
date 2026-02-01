@@ -5,6 +5,7 @@ Uses F2-Score (Macro) for model selection to minimize False Negatives.
 """
 
 import argparse
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Tuple
@@ -38,6 +39,23 @@ from utils import (
     get_patient_split,
     set_seed,
 )
+
+
+class TeeLogger(object):
+    """Tee stdout to both terminal and a log file."""
+
+    def __init__(self, filename):
+        self.terminal = sys.stdout
+        self.log = open(filename, "a", encoding="utf-8")
+
+    def write(self, message):
+        self.terminal.write(message)
+        self.log.write(message)
+        self.log.flush()
+
+    def flush(self):
+        self.terminal.flush()
+        self.log.flush()
 
 
 def parse_args() -> argparse.Namespace:
@@ -430,6 +448,11 @@ def train(
         exp_name = f"{exp_name}{args.postfix}"
     exp_dir = EXPERIMENTS_DIR / exp_name
     exp_dir.mkdir(parents=True, exist_ok=True)
+
+    # Start logging to file
+    log_path = exp_dir / "train_log.txt"
+    sys.stdout = TeeLogger(log_path)
+    print(f"📄 Logging training output to: {log_path}")
 
     print(f"Experiment directory: {exp_dir}")
 
