@@ -35,9 +35,9 @@ TASK_CONFIG = {
     "grading": {
         "model_path": EXPERIMENTS_DIR / "janitor_model_grading.pth",
         "quarantine_dir": PROJECT_ROOT / "data" / "quarantine_janitor_grading",
-        "classes": ["bone", "marrow"],
-        "artifact_class": 0,  # Index 0 = bone (artifact to filter)
-        "description": "Bone vs Marrow Classifier (Reticulin)",
+        "classes": ["artifact", "marrow"],
+        "artifact_class": 0,  # Index 0 = artifact (Bone/Bg to filter)
+        "description": "Artifact vs Marrow Classifier",
     },
     "subtype": {
         "model_path": EXPERIMENTS_DIR / "janitor_model_subtype.pth",
@@ -142,11 +142,18 @@ def run_janitor(args: argparse.Namespace) -> None:
     """Main function to clean the dataset using the Janitor model."""
     # Get task-specific configuration
     task_config = TASK_CONFIG[args.task]
-    model_path = task_config["model_path"]
     quarantine_dir = task_config["quarantine_dir"]
     artifact_class = task_config["artifact_class"]
     task_description = task_config["description"]
     classes = task_config["classes"]
+
+    # Determine model path: CLI arg overrides default config
+    if args.model_path is not None:
+        model_path = Path(args.model_path)
+        print(f"Using custom model path: {model_path}")
+    else:
+        model_path = task_config["model_path"]
+        print(f"Using default model path: {model_path}")
 
     device = get_device()
     print(f"Using device: {device}")
@@ -250,6 +257,12 @@ def parse_args() -> argparse.Namespace:
         choices=["grading", "subtype"],
         required=True,
         help="Task to run: 'grading' (Bone vs Marrow) or 'subtype' (Artifact vs Tissue)"
+    )
+    parser.add_argument(
+        "--model_path",
+        type=str,
+        default=None,
+        help="Path to the specific janitor model file (overrides default in TASK_CONFIG)"
     )
     parser.add_argument(
         "--input_dir",

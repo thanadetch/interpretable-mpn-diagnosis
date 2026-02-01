@@ -25,6 +25,8 @@ Dataset Structure Required:
 """
 import argparse
 import random
+import sys
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -37,6 +39,26 @@ from tqdm import tqdm
 
 from config import EXPERIMENTS_DIR, PROJECT_ROOT, SEED
 
+
+# ============================================================================
+# TeeLogger: Duplicate stdout to file and terminal
+# ============================================================================
+class TeeLogger(object):
+    """Logger that writes to both terminal and file."""
+    def __init__(self, filename):
+        self.terminal = sys.stdout
+        self.log = open(filename, "a", encoding="utf-8")
+
+    def write(self, message):
+        self.terminal.write(message)
+        self.log.write(message)
+        self.log.flush()
+
+    def flush(self):
+        self.terminal.flush()
+        self.log.flush()
+
+
 # ============================================================================
 # Task-Specific Configuration
 # ============================================================================
@@ -44,8 +66,8 @@ TASK_CONFIG = {
     "grading": {
         "data_dir": PROJECT_ROOT / "data" / "janitor_train_grading",
         "model_path": EXPERIMENTS_DIR / "janitor_model_grading.pth",
-        "classes": ["bone", "marrow"],
-        "description": "Bone vs Marrow Classifier (Reticulin)",
+        "classes": ["artifact", "marrow"],
+        "description": "Artifact (Bone/Bg) vs Marrow Classifier",
     },
     "subtype": {
         "data_dir": PROJECT_ROOT / "data" / "janitor_train_subtype",
@@ -197,9 +219,30 @@ def train_janitor(args: argparse.Namespace) -> None:
     # Get task-specific configuration
     task_config = TASK_CONFIG[args.task]
     data_dir = task_config["data_dir"]
-    output_path = task_config["model_path"]
     janitor_classes = task_config["classes"]
     task_description = task_config["description"]
+
+    # Create timestamped experiment directory
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    exp_name = f"janitor_{args.task}_{timestamp}"
+    exp_dir = EXPERIMENTS_DIR / exp_name
+    exp_dir.mkdir(parents=True, exist_ok=True)
+
+    # Setup logging to file
+    log_path = exp_dir / "train_log.txt"
+    sys.stdout = TeeLogger(log_path)
+    print(f"📄 Logging training output to: {log_path}")
+
+    # Log training configuration
+    print("\n" + "=" * 40)
+    print("🚀 Training Configuration:")
+    print("=" * 40)
+    for key, value in vars(args).items():
+        print(f"{key:20}: {value}")
+    print("=" * 40 + "\n")
+
+    # Model output path (inside experiment folder)
+    output_path = exp_dir / f"janitor_model_{args.task}.pth"
 
     # Device setup
     if torch.cuda.is_available():
@@ -329,6 +372,7 @@ def train_janitor(args: argparse.Namespace) -> None:
     print(f"{'='*60}")
     print(f"Training Complete!")
     print(f"Best Validation Accuracy: {best_val_acc:.2f}%")
+    print(f"Experiment directory: {exp_dir}")
     print(f"Model saved to: {output_path}")
     print(f"{'='*60}")
 
