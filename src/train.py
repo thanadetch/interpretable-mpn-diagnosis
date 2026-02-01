@@ -118,6 +118,12 @@ def parse_args() -> argparse.Namespace:
         help="Number of epochs to freeze backbone layers (0 = no freezing, standard fine-tuning)",
     )
 
+    parser.add_argument(
+        "--cbam",
+        action="store_true",
+        help="Enable CBAM Attention",
+    )
+
     return parser.parse_args()
 
 
@@ -360,7 +366,7 @@ def train(
     )
 
     # Create model
-    model = get_model(args.model, num_classes, device)
+    model = get_model(args.model, num_classes, device, use_cbam=args.cbam)
     print_model_summary(model, args.model)
 
     # CrossEntropyLoss with label smoothing (class balance handled by WeightedRandomSampler)
