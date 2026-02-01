@@ -2,6 +2,7 @@
 Custom Dataset for MPN Classification and Fibrosis Grading.
 Implements dual-task data loading with H&E and Reticulin image filtering.
 """
+
 from pathlib import Path
 from typing import Callable, List, Optional, Tuple
 
@@ -10,7 +11,7 @@ from PIL import Image
 from torch.utils.data import Dataset
 from torchvision import transforms
 
-from config import IMAGE_SIZE
+from config import IMAGE_SIZE_GRADING, IMAGE_SIZE_SUBTYPE
 
 
 class MPNDataset(Dataset):
@@ -81,6 +82,12 @@ class MPNDataset(Dataset):
         Returns:
             Composed transforms
         """
+        # Select target resolution based on task
+        if self.task == "classification":
+            target_size = IMAGE_SIZE_SUBTYPE
+        else:
+            target_size = IMAGE_SIZE_GRADING  # 224 for Reticulin
+
         if is_training:
             # Task-specific ColorJitter for biological validity
             if self.task == "classification":
@@ -100,27 +107,33 @@ class MPNDataset(Dataset):
                     hue=0.01,
                 )
 
-            return transforms.Compose([
-                transforms.Resize((IMAGE_SIZE, IMAGE_SIZE)),
-                transforms.RandomHorizontalFlip(p=0.5),
-                transforms.RandomVerticalFlip(p=0.5),
-                transforms.RandomRotation(degrees=90),
-                color_jitter,
-                transforms.ToTensor(),
-                transforms.Normalize(
-                    mean=[0.485, 0.456, 0.406],  # ImageNet stats
-                    std=[0.229, 0.224, 0.225],
-                ),
-            ])
+            return transforms.Compose(
+                [
+                    transforms.RandomResizedCrop(
+                        (target_size, target_size), scale=(0.4, 1.0)
+                    ),
+                    transforms.RandomRotation(degrees=15),
+                    transforms.RandomHorizontalFlip(p=0.5),
+                    transforms.RandomVerticalFlip(p=0.5),
+                    color_jitter,
+                    transforms.ToTensor(),
+                    transforms.Normalize(
+                        mean=[0.485, 0.456, 0.406],  # ImageNet stats
+                        std=[0.229, 0.224, 0.225],
+                    ),
+                ]
+            )
         else:
-            return transforms.Compose([
-                transforms.Resize((IMAGE_SIZE, IMAGE_SIZE)),
-                transforms.ToTensor(),
-                transforms.Normalize(
-                    mean=[0.485, 0.456, 0.406],
-                    std=[0.229, 0.224, 0.225],
-                ),
-            ])
+            return transforms.Compose(
+                [
+                    transforms.Resize((target_size, target_size)),
+                    transforms.ToTensor(),
+                    transforms.Normalize(
+                        mean=[0.485, 0.456, 0.406],
+                        std=[0.229, 0.224, 0.225],
+                    ),
+                ]
+            )
 
     def __len__(self) -> int:
         """Return the number of samples in the dataset."""
@@ -166,4 +179,3 @@ class MPNDataset(Dataset):
             Patient ID string (folder name)
         """
         return Path(file_path).parent.name
-

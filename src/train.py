@@ -3,6 +3,7 @@ Training pipeline for MPN Classification and Fibrosis Grading.
 Implements WeightedRandomSampler for handling class imbalance.
 Uses F2-Score (Macro) for model selection to minimize False Negatives.
 """
+
 import argparse
 from datetime import datetime
 from pathlib import Path
@@ -237,7 +238,7 @@ def train_one_epoch(
 
         # Forward pass
         optimizer.zero_grad()
-        
+
         with torch.amp.autocast(device_type=device.type):
             outputs = model(images)
             loss = criterion(outputs, labels)
@@ -256,13 +257,12 @@ def train_one_epoch(
         correct += predicted.eq(labels).sum().item()
 
         # Update progress bar
-        pbar.set_postfix({
-            "loss": f"{loss.item():.4f}",
-            "acc": f"{100. * correct / total:.2f}%"
-        })
+        pbar.set_postfix(
+            {"loss": f"{loss.item():.4f}", "acc": f"{100.0 * correct / total:.2f}%"}
+        )
 
     epoch_loss = running_loss / total
-    epoch_acc = 100. * correct / total
+    epoch_acc = 100.0 * correct / total
 
     return epoch_loss, epoch_acc
 
@@ -317,13 +317,17 @@ def validate(
         all_labels.extend(labels.cpu().numpy().tolist())
 
     epoch_loss = running_loss / total
-    epoch_acc = 100. * correct / total
+    epoch_acc = 100.0 * correct / total
 
     # Calculate Macro F2-Score (beta=2 emphasizes recall over precision)
     labels_list = list(range(num_classes))
     epoch_f2 = fbeta_score(
-        all_labels, all_preds, beta=2, average='macro',
-        labels=labels_list, zero_division=0
+        all_labels,
+        all_preds,
+        beta=2,
+        average="macro",
+        labels=labels_list,
+        zero_division=0,
     )
 
     return epoch_loss, epoch_acc, epoch_f2
@@ -402,7 +406,9 @@ def train(
             param.requires_grad = True
 
         trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-        print(f"\n[Frozen Mode] Training {head_name} layer only for {args.freeze_epochs} epochs")
+        print(
+            f"\n[Frozen Mode] Training {head_name} layer only for {args.freeze_epochs} epochs"
+        )
         print(f"[*] Total parameters: {total_params:,}")
         print(f"[*] Trainable parameters: {trainable_params:,}")
 
@@ -441,10 +447,10 @@ def train(
 
     scaler = GradScaler(enabled=(device.type == "cuda"))
 
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"Starting training: {args.task} with {args.model}")
     print(f"Model selection metric: F2-Score (Macro, beta=2)")
-    print(f"{'='*60}\n")
+    print(f"{'=' * 60}\n")
 
     for epoch in range(args.epochs):
         print(f"Epoch [{epoch + 1}/{args.epochs}]")
@@ -457,7 +463,9 @@ def train(
             for param in model.parameters():
                 param.requires_grad = True
 
-            trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+            trainable_params = sum(
+                p.numel() for p in model.parameters() if p.requires_grad
+            )
             print(f"[*] Trainable parameters: {trainable_params:,}")
 
             # Re-initialize optimizer with all parameters and reduced learning rate
@@ -467,7 +475,9 @@ def train(
 
             # Re-initialize scheduler for remaining epochs
             remaining_epochs = args.epochs - epoch
-            scheduler = CosineAnnealingLR(optimizer, T_max=remaining_epochs, eta_min=1e-6)
+            scheduler = CosineAnnealingLR(
+                optimizer, T_max=remaining_epochs, eta_min=1e-6
+            )
 
         # Train
         train_loss, train_acc = train_one_epoch(
@@ -529,12 +539,12 @@ def train(
     # Save training history
     torch.save(history, exp_dir / "history.pth")
 
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"Training completed!")
     print(f"Best validation F2-Score: {best_val_f2:.4f} (Epoch {best_epoch})")
     print(f"Best validation Accuracy: {best_val_acc:.2f}%")
     print(f"Model saved to: {exp_dir}")
-    print(f"{'='*60}\n")
+    print(f"{'=' * 60}\n")
 
     return {
         "best_val_f2": best_val_f2,

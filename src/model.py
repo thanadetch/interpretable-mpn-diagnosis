@@ -2,6 +2,7 @@
 Model factory for MPN Classification and Fibrosis Grading.
 Supports ResNet18, EfficientNet-B0, and DenseNet121 with pretrained ImageNet weights.
 """
+
 import torch
 import torch.nn as nn
 from collections import OrderedDict
@@ -77,10 +78,10 @@ class CBAM(nn.Module):
 class CBAMBasicBlockWrapper(nn.Module):
     """
     Wrapper that applies CBAM attention inside the residual path of a ResNet BasicBlock.
-    
+
     CBAM is applied after bn2 but BEFORE the skip connection addition to preserve
     the identity mapping gradient flow ("highway" path).
-    
+
     Logic: out = cbam(bn2(conv2(relu(bn1(conv1(x)))))); out += identity; return relu(out)
     """
 
@@ -93,32 +94,32 @@ class CBAMBasicBlockWrapper(nn.Module):
         self.conv2 = block.conv2
         self.bn2 = block.bn2
         self.downsample = block.downsample  # May be None
-        
+
         # CBAM module applied on residual branch
         self.cbam = CBAM(planes, reduction)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # Save identity for skip connection
         identity = x
-        
+
         # Residual path: conv1 -> bn1 -> relu -> conv2 -> bn2
         out = self.conv1(x)
         out = self.bn1(out)
         out = self.relu(out)
         out = self.conv2(out)
         out = self.bn2(out)
-        
+
         # Apply CBAM on residual branch (before addition)
         out = self.cbam(out)
-        
+
         # Handle downsample for identity path
         if self.downsample is not None:
             identity = self.downsample(x)
-        
+
         # Add skip connection, then ReLU
         out += identity
         out = self.relu(out)
-        
+
         return out
 
 
@@ -236,16 +237,23 @@ def get_model(
             print("[CBAM] Applying CBAM attention to ResNet18 blocks")
             model = apply_cbam_to_resnet(model)
 
-        # Modify the final fully connected layer with dropout for regularization
+        # Modify the final fully connected layer
         in_features = model.fc.in_features
-        model.fc = nn.Sequential(
-            nn.Dropout(p=0.25),
-            nn.Linear(in_features, num_classes),
-        )
+        if use_cbam:
+            # CBAM recipe: add Dropout for regularization
+            model.fc = nn.Sequential(
+                nn.Dropout(p=0.25),
+                nn.Linear(in_features, num_classes),
+            )
+        else:
+            # Baseline recipe: no Dropout
+            model.fc = nn.Linear(in_features, num_classes)
 
     elif model_name == "efficientnet_b0":
         # Load pretrained EfficientNet-B0
-        model = models.efficientnet_b0(weights=models.EfficientNet_B0_Weights.IMAGENET1K_V1)
+        model = models.efficientnet_b0(
+            weights=models.EfficientNet_B0_Weights.IMAGENET1K_V1
+        )
 
         # Modify the classifier layer
         in_features = model.classifier[1].in_features
@@ -263,12 +271,17 @@ def get_model(
             print("[CBAM] Applying CBAM attention to DenseNet121 blocks")
             model = apply_cbam_to_densenet(model)
 
-        # DenseNet classifier with dropout for regularization
+        # Modify the classifier layer
         in_features = model.classifier.in_features
-        model.classifier = nn.Sequential(
-            nn.Dropout(p=0.25),
-            nn.Linear(in_features, num_classes),
-        )
+        if use_cbam:
+            # CBAM recipe: add Dropout for regularization
+            model.classifier = nn.Sequential(
+                nn.Dropout(p=0.25),
+                nn.Linear(in_features, num_classes),
+            )
+        else:
+            # Baseline recipe: no Dropout
+            model.classifier = nn.Linear(in_features, num_classes)
 
     else:
         raise ValueError(
@@ -328,9 +341,8 @@ def print_model_summary(model: nn.Module, model_name: str) -> None:
         model_name: Name of the model
     """
     total_params = count_parameters(model)
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"Model: {model_name}")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
     print(f"Total trainable parameters: {total_params:,}")
-    print(f"{'='*60}\n")
-
+    print(f"{'=' * 60}\n")

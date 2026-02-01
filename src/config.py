@@ -1,6 +1,7 @@
 """
 Configuration constants for MPN Classification and Fibrosis Grading framework.
 """
+
 from pathlib import Path
 from typing import Dict
 
@@ -107,7 +108,12 @@ GRADE_MAP_INV: Dict[int, str] = {v: k for k, v in GRADE_MAP.items()}
 # ============================================================================
 # Image Configuration
 # ============================================================================
-IMAGE_SIZE: int = 224  # Standard size for pretrained models
+IMAGE_SIZE: int = 224  # Default/Fallback size for pretrained models
+
+# Task-specific resolutions
+IMAGE_SIZE_GRADING: int = 224  # Standard size for Reticulin fibrosis grading
+IMAGE_SIZE_SUBTYPE: int = 224
+
 IMAGE_EXTENSIONS: tuple = (".tif", ".tiff", ".png", ".jpg", ".jpeg")
 
 # ============================================================================

@@ -7,7 +7,7 @@
 `python src/train.py --task grading --data_mode resize --model resnet18 --epochs 50`
 
 ### Patch Data Mode
-`python src/train.py --task classification --data_mode patch --model resnet18 --epochs 50`
+`python src/train.py --task classification --data_mode subtype_patch_clean --model resnet18 --epochs 50`
 `python src/train.py --task classification --data_mode patch --model resnet18 --epochs 50`
 
 `python src/train.py --task grading --data_mode patch --model resnet18 --epochs 50`
