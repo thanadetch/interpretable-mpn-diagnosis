@@ -454,6 +454,14 @@ def train(
     sys.stdout = TeeLogger(log_path)
     print(f"📄 Logging training output to: {log_path}")
 
+    # Log training configuration
+    print("\n" + "="*40)
+    print("🚀 Training Configuration:")
+    print("="*40)
+    for key, value in vars(args).items():
+        print(f"{key:20}: {value}")
+    print("="*40 + "\n")
+
     print(f"Experiment directory: {exp_dir}")
 
     # Training loop
