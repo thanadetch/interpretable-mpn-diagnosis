@@ -33,6 +33,7 @@ from config import (
 )
 from dataset import MPNDataset
 from model import get_model, print_model_summary
+from stain_norm import StainNormLayer
 from utils import (
     get_class_weights,
     get_num_classes,
@@ -56,6 +57,22 @@ class TeeLogger(object):
     def flush(self):
         self.terminal.flush()
         self.log.flush()
+
+
+class ImageNetNormalize(nn.Module):
+    """GPU-friendly ImageNet normalization using register_buffer."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.register_buffer(
+            "mean", torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
+        )
+        self.register_buffer(
+            "std", torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return (x - self.mean) / self.std
 
 
 def parse_args() -> argparse.Namespace:
@@ -391,24 +408,49 @@ def train(
     model = get_model(args.model, num_classes, device, use_cbam=args.cbam)
     print_model_summary(model, args.model)
 
+    # === Construct GPU preprocessing pipeline ===
+    if args.task == "classification":
+        # H&E images: apply stain normalization first
+        model = nn.Sequential(
+            StainNormLayer(),
+            ImageNetNormalize(),
+            model,
+        )
+        print("\n[Pipeline] StainNormLayer -> ImageNetNormalize -> Model")
+    else:  # grading
+        # Reticulin images: skip stain normalization
+        model = nn.Sequential(
+            ImageNetNormalize(),
+            model,
+        )
+        print("\n[Pipeline] ImageNetNormalize -> Model (no stain norm)")
+
+    model = model.to(device)
+
     # CrossEntropyLoss with label smoothing (class balance handled by WeightedRandomSampler)
     criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
 
     # === Freeze/Unfreeze based on --freeze_epochs ===
     total_params = sum(p.numel() for p in model.parameters())
 
+    # Handle nn.Sequential wrapper (StainNormLayer -> ImageNetNormalize -> Model)
+    if isinstance(model, nn.Sequential):
+        actual_model = model[-1]  # The backbone is the last element
+    else:
+        actual_model = model
+
     # Dynamically identify the classification head
-    if hasattr(model, "fc"):
+    if hasattr(actual_model, "fc"):
         # ResNet, ResNeXt, etc.
-        head = model.fc
+        head = actual_model.fc
         head_name = "fc"
-    elif hasattr(model, "classifier"):
+    elif hasattr(actual_model, "classifier"):
         # EfficientNet, DenseNet, MobileNet, etc.
-        head = model.classifier
+        head = actual_model.classifier
         head_name = "classifier"
-    elif hasattr(model, "heads"):
+    elif hasattr(actual_model, "heads"):
         # Vision Transformer (ViT)
-        head = model.heads
+        head = actual_model.heads
         head_name = "heads"
     else:
         raise AttributeError(
@@ -455,12 +497,12 @@ def train(
     print(f"📄 Logging training output to: {log_path}")
 
     # Log training configuration
-    print("\n" + "="*40)
+    print("\n" + "=" * 40)
     print("🚀 Training Configuration:")
-    print("="*40)
+    print("=" * 40)
     for key, value in vars(args).items():
         print(f"{key:20}: {value}")
-    print("="*40 + "\n")
+    print("=" * 40 + "\n")
 
     print(f"Experiment directory: {exp_dir}")
 

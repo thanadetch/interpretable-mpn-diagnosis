@@ -64,11 +64,20 @@
 `python src/run_janitor.py \
     --task subtype \
     --input_dir data/processed_subtype_clean \
-    --threshold 0.80`
+    --model_path experiments/janitor_subtype_20260202_213526/janitor_model_subtype.pth \
+    --threshold 0.95`
 
 `python src/run_janitor.py \
     --task grading \
     --input_dir data/processed_grading_clean \
-    --threshold 0.80`
+    --model_path experiments/janitor_grading_20260202_214230/janitor_model_grading.pth \
+    --threshold 0.95`
 
-python tools/data_stats.py
+`python tools/data_stats.py`
+`python src/train_janitor.py --task subtype --epochs 20`
+
+# Default: 5 samples
+`python tools/check_stain.py`
+
+# Custom: 10 samples
+`python tools/check_stain.py --num_samples 10`
