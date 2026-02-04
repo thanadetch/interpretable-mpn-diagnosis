@@ -92,7 +92,7 @@ class MPNDataset(Dataset):
             # Build base augmentation list
             transform_list = [
                 transforms.Resize((target_size, target_size)),
-                transforms.RandomRotation(degrees=15),
+                transforms.RandomRotation(degrees=180),
                 transforms.RandomHorizontalFlip(p=0.5),
                 transforms.RandomVerticalFlip(p=0.5),
             ]
