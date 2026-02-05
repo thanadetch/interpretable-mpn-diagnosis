@@ -89,35 +89,49 @@ class MPNDataset(Dataset):
             target_size = IMAGE_SIZE_GRADING  # 224 for Reticulin
 
         if is_training:
-            # Build base augmentation list
-            transform_list = [
-                transforms.RandomResizedCrop(
-                    (target_size, target_size), scale=(0.4, 1.0)
-                ),
-                transforms.RandomRotation(degrees=15),
-                transforms.RandomHorizontalFlip(p=0.5),
-                transforms.RandomVerticalFlip(p=0.5),
-            ]
-
-            # ColorJitter: Only for grading (Reticulin)
-            # Classification uses StainNorm downstream, so skip ColorJitter
-            if self.task == "grading":
-                transform_list.append(
-                    transforms.ColorJitter(
-                        brightness=0.2,
-                        contrast=0.2,
-                        saturation=0.05,
-                        hue=0.01,
-                    )
+            # Task-specific ColorJitter for biological validity
+            if self.task == "classification":
+                # H&E images: restrict hue shifts to preserve purple/pink stain colors
+                color_jitter = transforms.ColorJitter(
+                    brightness=0.2,
+                    contrast=0.2,
+                    saturation=0.2,
+                    hue=0.02,
+                )
+            else:  # grading (Reticulin)
+                # Reticulin silver stains: minimal saturation/hue (monochromatic black fibers)
+                color_jitter = transforms.ColorJitter(
+                    brightness=0.2,
+                    contrast=0.2,
+                    saturation=0.05,
+                    hue=0.01,
                 )
 
-            transform_list.append(transforms.ToTensor())
-            return transforms.Compose(transform_list)
+            return transforms.Compose(
+                [
+                    transforms.RandomResizedCrop(
+                        (target_size, target_size), scale=(0.4, 1.0)
+                    ),
+                    transforms.RandomRotation(degrees=15),
+                    transforms.RandomHorizontalFlip(p=0.5),
+                    transforms.RandomVerticalFlip(p=0.5),
+                    color_jitter,
+                    transforms.ToTensor(),
+                    transforms.Normalize(
+                        mean=[0.485, 0.456, 0.406],  # ImageNet stats
+                        std=[0.229, 0.224, 0.225],
+                    ),
+                ]
+            )
         else:
             return transforms.Compose(
                 [
                     transforms.Resize((target_size, target_size)),
                     transforms.ToTensor(),
+                    transforms.Normalize(
+                        mean=[0.485, 0.456, 0.406],
+                        std=[0.229, 0.224, 0.225],
+                    ),
                 ]
             )
 
