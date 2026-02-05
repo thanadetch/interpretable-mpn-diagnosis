@@ -30,11 +30,11 @@ class MPNDataset(Dataset):
     """
 
     def __init__(
-            self,
-            file_list: List[Tuple[Path, int]],
-            task: str,
-            transform: Optional[Callable] = None,
-            is_training: bool = True,
+        self,
+        file_list: List[Tuple[Path, int]],
+        task: str,
+        transform: Optional[Callable] = None,
+        is_training: bool = True,
     ) -> None:
         """
         Initialize the MPN Dataset.
@@ -91,7 +91,9 @@ class MPNDataset(Dataset):
         if is_training:
             # Build base augmentation list
             transform_list = [
-                transforms.Resize((target_size, target_size)),
+                transforms.RandomResizedCrop(
+                    (target_size, target_size), scale=(0.4, 1.0)
+                ),
                 transforms.RandomRotation(degrees=15),
                 transforms.RandomHorizontalFlip(p=0.5),
                 transforms.RandomVerticalFlip(p=0.5),

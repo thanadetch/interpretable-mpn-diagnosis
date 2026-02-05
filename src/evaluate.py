@@ -7,7 +7,6 @@ Usage:
     python src/evaluate.py --checkpoint experiments/xxx/best_model.pth --data_mode patch --aggregation mean --level image
     python src/evaluate.py --checkpoint experiments/xxx/best_model.pth --data_mode patch --aggregation vote --level patient
 """
-
 import argparse
 import json
 import re
@@ -46,24 +45,7 @@ from config import (
 )
 from dataset import MPNDataset
 from model import get_model
-from stain_norm import StainNormLayer
 from utils import get_num_classes, get_patient_split, set_seed
-
-
-class ImageNetNormalize(torch.nn.Module):
-    """GPU-friendly ImageNet normalization using register_buffer."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.register_buffer(
-            "mean", torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
-        )
-        self.register_buffer(
-            "std", torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return (x - self.mean) / self.std
 
 
 # Ensure reports directory exists
@@ -125,18 +107,9 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def load_checkpoint(
-    checkpoint_path: str, device: torch.device
-) -> Tuple[torch.nn.Module, dict]:
+def load_checkpoint(checkpoint_path: str, device: torch.device) -> Tuple[torch.nn.Module, dict]:
     """
     Load model from checkpoint.
-
-    The model was trained with a preprocessing pipeline wrapped in nn.Sequential:
-    - For classification: StainNormLayer -> ImageNetNormalize -> base_model
-    - For grading: ImageNetNormalize -> base_model
-
-    This function reconstructs the same pipeline before loading the state dict
-    to ensure the architecture matches the checkpoint exactly.
 
     Args:
         checkpoint_path: Path to checkpoint file
@@ -147,32 +120,12 @@ def load_checkpoint(
     """
     checkpoint = torch.load(checkpoint_path, map_location=device)
     args = checkpoint["args"]
-    task = args["task"]
 
     # Get number of classes based on task
-    num_classes = get_num_classes(task)
+    num_classes = get_num_classes(args["task"])
 
-    # Create base model (backbone)
-    base_model = get_model(args["model"], num_classes, device)
-
-    # Reconstruct the GPU preprocessing pipeline to match training
-    if task == "classification":
-        # H&E images: StainNormLayer -> ImageNetNormalize -> Model
-        model = torch.nn.Sequential(
-            StainNormLayer(),
-            ImageNetNormalize(),
-            base_model,
-        )
-        print("[Pipeline] StainNormLayer -> ImageNetNormalize -> Model")
-    else:  # grading
-        # Reticulin images: ImageNetNormalize -> Model (no stain normalization)
-        model = torch.nn.Sequential(
-            ImageNetNormalize(),
-            base_model,
-        )
-        print("[Pipeline] ImageNetNormalize -> Model (no stain norm)")
-
-    model = model.to(device)
+    # Create model
+    model = get_model(args["model"], num_classes, device)
     model.load_state_dict(checkpoint["model_state_dict"])
     model.eval()
 
@@ -233,7 +186,7 @@ def _extract_original_image_name(patch_path: str) -> str:
     """
     filename = Path(patch_path).stem  # Remove extension
     # Remove _rXcX suffix (e.g., _r0c0, _r1c2)
-    original_name = re.sub(r"_r\d+c\d+$", "", filename)
+    original_name = re.sub(r'_r\d+c\d+$', '', filename)
     return original_name
 
 
@@ -321,6 +274,7 @@ def aggregate_predictions(
             aggregated_preds[group_key] = preds[max_conf_idx]
             aggregated_probs[group_key] = probs[max_conf_idx]
 
+
     return aggregated_preds, aggregated_labels, aggregated_probs
 
 
@@ -345,32 +299,15 @@ def compute_metrics(
 
     metrics = {
         "accuracy": accuracy_score(y_true, y_pred),
-        "f1_macro": f1_score(
-            y_true, y_pred, average="macro", labels=labels, zero_division=0
-        ),
-        "f1_weighted": f1_score(
-            y_true, y_pred, average="weighted", labels=labels, zero_division=0
-        ),
-        "f2_macro": fbeta_score(
-            y_true, y_pred, beta=2, average="macro", labels=labels, zero_division=0
-        ),
-        "f2_weighted": fbeta_score(
-            y_true, y_pred, beta=2, average="weighted", labels=labels, zero_division=0
-        ),
-        "precision_macro": precision_score(
-            y_true, y_pred, average="macro", labels=labels, zero_division=0
-        ),
-        "recall_macro": recall_score(
-            y_true, y_pred, average="macro", labels=labels, zero_division=0
-        ),
+        "f1_macro": f1_score(y_true, y_pred, average="macro", labels=labels, zero_division=0),
+        "f1_weighted": f1_score(y_true, y_pred, average="weighted", labels=labels, zero_division=0),
+        "f2_macro": fbeta_score(y_true, y_pred, beta=2, average="macro", labels=labels, zero_division=0),
+        "f2_weighted": fbeta_score(y_true, y_pred, beta=2, average="weighted", labels=labels, zero_division=0),
+        "precision_macro": precision_score(y_true, y_pred, average="macro", labels=labels, zero_division=0),
+        "recall_macro": recall_score(y_true, y_pred, average="macro", labels=labels, zero_division=0),
         "confusion_matrix": confusion_matrix(y_true, y_pred, labels=labels).tolist(),
         "classification_report": classification_report(
-            y_true,
-            y_pred,
-            target_names=class_names,
-            labels=labels,
-            output_dict=True,
-            zero_division=0,
+            y_true, y_pred, target_names=class_names, labels=labels, output_dict=True, zero_division=0
         ),
     }
 
@@ -434,34 +371,28 @@ def plot_per_class_metrics(
     sns.set_theme(style="whitegrid")
 
     # Filter out summary keys, keep only class metrics
-    summary_keys = {"accuracy", "macro avg", "weighted avg"}
+    summary_keys = {'accuracy', 'macro avg', 'weighted avg'}
     class_data = []
 
     for class_name, metrics in report.items():
         if class_name not in summary_keys and isinstance(metrics, dict):
             # Calculate F2-Score per class from precision and recall
-            precision = metrics.get("precision", 0)
-            recall = metrics.get("recall", 0)
+            precision = metrics.get('precision', 0)
+            recall = metrics.get('recall', 0)
             # F2 = (1 + beta^2) * (precision * recall) / (beta^2 * precision + recall)
             beta = 2
             if precision + recall > 0:
-                f2_score = (
-                    (1 + beta**2)
-                    * (precision * recall)
-                    / (beta**2 * precision + recall)
-                )
+                f2_score = (1 + beta**2) * (precision * recall) / (beta**2 * precision + recall)
             else:
                 f2_score = 0.0
 
-            class_data.append(
-                {
-                    "Class": class_name,
-                    "Precision": precision,
-                    "Recall": recall,
-                    "F1-Score": metrics.get("f1-score", 0),
-                    "F2-Score": f2_score,
-                }
-            )
+            class_data.append({
+                'Class': class_name,
+                'Precision': precision,
+                'Recall': recall,
+                'F1-Score': metrics.get('f1-score', 0),
+                'F2-Score': f2_score,
+            })
 
     if not class_data:
         print(f"Warning: No class data found in report, skipping per-class plot.")
@@ -471,25 +402,31 @@ def plot_per_class_metrics(
     df = pd.DataFrame(class_data)
     df_long = pd.melt(
         df,
-        id_vars=["Class"],
-        value_vars=["Precision", "Recall", "F1-Score", "F2-Score"],
-        var_name="Metric",
-        value_name="Score",
+        id_vars=['Class'],
+        value_vars=['Precision', 'Recall', 'F1-Score', 'F2-Score'],
+        var_name='Metric',
+        value_name='Score'
     )
 
     # Create the grouped bar chart
     plt.figure(figsize=(12, 6))
-    ax = sns.barplot(data=df_long, x="Class", y="Score", hue="Metric", palette="Set2")
+    ax = sns.barplot(
+        data=df_long,
+        x='Class',
+        y='Score',
+        hue='Metric',
+        palette='Set2'
+    )
 
     # Add value labels on top of bars
     for container in ax.containers:
-        ax.bar_label(container, fmt="%.2f", fontsize=8, padding=3)
+        ax.bar_label(container, fmt='%.2f', fontsize=8, padding=3)
 
     plt.ylim(0, 1.15)  # Leave room for labels
-    plt.xlabel("Class", fontsize=12)
-    plt.ylabel("Score", fontsize=12)
-    plt.title(title, fontsize=14, fontweight="bold")
-    plt.legend(title="Metric", loc="upper right")
+    plt.xlabel('Class', fontsize=12)
+    plt.ylabel('Score', fontsize=12)
+    plt.title(title, fontsize=14, fontweight='bold')
+    plt.legend(title='Metric', loc='upper right')
     plt.tight_layout()
     plt.savefig(save_path, dpi=150)
     plt.close()
@@ -516,33 +453,39 @@ def plot_overall_metrics(
 
     # Extract overall metrics (including F2-Score)
     overall_data = {
-        "Accuracy": metrics.get("accuracy", 0),
-        "Precision (Macro)": metrics.get("precision_macro", 0),
-        "Recall (Macro)": metrics.get("recall_macro", 0),
-        "F1-Score (Macro)": metrics.get("f1_macro", 0),
-        "F2-Score (Macro)": metrics.get("f2_macro", 0),
+        'Accuracy': metrics.get('accuracy', 0),
+        'Precision (Macro)': metrics.get('precision_macro', 0),
+        'Recall (Macro)': metrics.get('recall_macro', 0),
+        'F1-Score (Macro)': metrics.get('f1_macro', 0),
+        'F2-Score (Macro)': metrics.get('f2_macro', 0),
     }
 
     # Create DataFrame
-    df = pd.DataFrame(
-        {"Metric": list(overall_data.keys()), "Score": list(overall_data.values())}
-    )
+    df = pd.DataFrame({
+        'Metric': list(overall_data.keys()),
+        'Score': list(overall_data.values())
+    })
 
     # Create the bar chart
     plt.figure(figsize=(10, 6))
     ax = sns.barplot(
-        data=df, x="Metric", y="Score", palette="viridis", hue="Metric", legend=False
+        data=df,
+        x='Metric',
+        y='Score',
+        palette='viridis',
+        hue='Metric',
+        legend=False
     )
 
     # Add value labels on top of bars
     for container in ax.containers:
-        ax.bar_label(container, fmt="%.3f", fontsize=10, padding=3)
+        ax.bar_label(container, fmt='%.3f', fontsize=10, padding=3)
 
     plt.ylim(0, 1.15)  # Leave room for labels
-    plt.xlabel("Metric", fontsize=12)
-    plt.ylabel("Score", fontsize=12)
-    plt.title(title, fontsize=14, fontweight="bold")
-    plt.xticks(rotation=15, ha="right")
+    plt.xlabel('Metric', fontsize=12)
+    plt.ylabel('Score', fontsize=12)
+    plt.title(title, fontsize=14, fontweight='bold')
+    plt.xticks(rotation=15, ha='right')
     plt.tight_layout()
     plt.savefig(save_path, dpi=150)
     plt.close()
@@ -579,13 +522,9 @@ def evaluate(args: argparse.Namespace) -> Dict:
     print(f"Task: {task}, Model: {model_name}")
     # Handle both old (val_acc only) and new (val_f2) checkpoint formats
     if "val_f2" in checkpoint:
-        print(
-            f"Checkpoint epoch: {checkpoint['epoch']}, Val F2: {checkpoint['val_f2']:.4f}, Val Acc: {checkpoint['val_acc']:.2f}%"
-        )
+        print(f"Checkpoint epoch: {checkpoint['epoch']}, Val F2: {checkpoint['val_f2']:.4f}, Val Acc: {checkpoint['val_acc']:.2f}%")
     else:
-        print(
-            f"Checkpoint epoch: {checkpoint['epoch']}, Val Acc: {checkpoint['val_acc']:.2f}%"
-        )
+        print(f"Checkpoint epoch: {checkpoint['epoch']}, Val Acc: {checkpoint['val_acc']:.2f}%")
 
     # Resolve data mode
     mode_config = DATA_MODE_CONFIG[args.data_mode]
@@ -630,12 +569,8 @@ def evaluate(args: argparse.Namespace) -> Dict:
 
         # Aggregate predictions based on level (image or patient)
         aggregated_preds, aggregated_labels, _ = aggregate_predictions(
-            predictions,
-            probabilities,
-            file_paths,
-            labels,
-            args.aggregation,
-            level=args.level,
+            predictions, probabilities, file_paths, labels,
+            args.aggregation, level=args.level
         )
 
         y_true = list(aggregated_labels.values())
@@ -654,15 +589,15 @@ def evaluate(args: argparse.Namespace) -> Dict:
     metrics = compute_metrics(y_true, y_pred, class_names)
 
     # Print results
-    print(f"\n{'=' * 60}")
+    print(f"\n{'='*60}")
     print(f"Evaluation Results ({level}-level)")
-    print(f"{'=' * 60}")
+    print(f"{'='*60}")
     print(f"Accuracy:        {metrics['accuracy']:.4f}")
     print(f"Macro F2-Score:  {metrics['f2_macro']:.4f}  <-- Primary Metric")
     print(f"Macro F1-Score:  {metrics['f1_macro']:.4f}")
     print(f"Macro Precision: {metrics['precision_macro']:.4f}")
     print(f"Macro Recall:    {metrics['recall_macro']:.4f}")
-    print(f"{'=' * 60}\n")
+    print(f"{'='*60}\n")
 
     # Extract experiment name from checkpoint path
     experiment_name = checkpoint_path.parent.name
@@ -708,9 +643,7 @@ def evaluate(args: argparse.Namespace) -> Dict:
     if is_patch_mode:
         per_class_title += f" - {args.aggregation} aggregation"
     per_class_path = exp_figures_dir / f"{report_name}_per_class_detailed.png"
-    plot_per_class_metrics(
-        metrics["classification_report"], per_class_path, per_class_title
-    )
+    plot_per_class_metrics(metrics["classification_report"], per_class_path, per_class_title)
 
     # Plot overall metrics
     overall_title = f"Overall Performance ({task}, {args.data_mode})"
@@ -730,3 +663,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
