@@ -1,15 +1,9 @@
 """
 Universal Stain Normalization Layer (CPU/GPU Compatible).
-Uses Strategy Pattern to separate CPU (Numpy) and GPU (Torch) backends.
-
-PERFORMANCE FIX:
-Implements 'Optimistic GPU Execution with CPU Fallback'.
-1. Tries to normalize on GPU first (Fastest).
-2. If A100 instability occurs (linalg error), falls back to CPU for that specific patch.
+Uses Standard H&E Reference Values (Macenko).
+Classes are fully decoupled for independent testing.
 """
 
-import os
-import cv2
 import numpy as np
 import torch
 import torch.nn as nn
@@ -25,49 +19,40 @@ def _is_background_torch(img: torch.Tensor, threshold: int = BACKGROUND_THRESHOL
 
 class _StainNormNumpy(nn.Module):
     """
-    Standard CPU-based stain normalization using Numpy backend.
+    Standard CPU-based stain normalization.
+    Uses Numpy backend with Hardcoded Standard Values.
     """
 
-    def __init__(self, target_path: str) -> None:
+    def __init__(self, target_path: str = None) -> None:
         super().__init__()
-        self.target_path = target_path
+        # Initialize with Numpy backend
         self.normalizer = MacenkoNormalizer(backend="numpy")
-        self._fitted = False
-        self._fit_to_target()
 
-    def _fit_to_target(self) -> None:
-        if not os.path.exists(self.target_path):
-            # print(f"[_StainNormNumpy] Target not found: {self.target_path}")
-            return
+        # ✅ Set Standard H&E Reference Values (Macenko et al.)
+        self.normalizer.HERef = np.array([
+            [0.5626, 0.2159],
+            [0.7201, 0.8012],
+            [0.4062, 0.5581]
+        ])
+        # Max Concentrations
+        self.normalizer.maxC = np.array([1.9705, 1.0308])
 
-        target_bgr = cv2.imread(self.target_path)
-        if target_bgr is None:
-            return
-
-        target_rgb = cv2.cvtColor(target_bgr, cv2.COLOR_BGR2RGB)
-        try:
-            self.normalizer.fit(target_rgb)
-            self._fitted = True
-        except Exception as e:
-            print(f"[_StainNormNumpy] Fit Error: {e}")
+        print(f"[_StainNormNumpy] Initialized with Standard Values.")
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if not self._fitted:
-            return x
-
         batch_size = x.shape[0]
         dtype = x.dtype
         device = x.device
 
-        # [B, C, H, W] -> [B, H, W, C] numpy uint8
+        # Prepare input: [B, C, H, W] -> [B, H, W, C] numpy uint8
         x_255 = (x * 255).to(torch.uint8)
         x_hwc = x_255.permute(0, 2, 3, 1).cpu().numpy()
 
         normalized_list = []
         for i in range(batch_size):
             img = x_hwc[i]
-            # No explicit background check here to keep logic consistent
             try:
+                # Normalize using Numpy
                 norm_img, _, _ = self.normalizer.normalize(I=img, stains=True)
                 normalized_list.append(norm_img)
             except Exception:
@@ -76,122 +61,73 @@ class _StainNormNumpy(nn.Module):
         # Reconstruct
         x_normalized = np.stack(normalized_list, axis=0)
         x_tensor = torch.from_numpy(x_normalized).to(device)
-
         return x_tensor.permute(0, 3, 1, 2).to(dtype) / 255.0
 
 
 class _StainNormTorch(nn.Module):
     """
-    High-Performance GPU Stain Normalization with Fallback.
+    Standard GPU-based stain normalization.
+    Uses Torch backend with Hardcoded Standard Values.
+    Run purely on GPU (No CPU offloading).
     """
 
-    def __init__(self, target_path: str) -> None:
+    def __init__(self, target_path: str = None) -> None:
         super().__init__()
-        self.target_path = target_path
+        # Initialize with Torch backend
+        self.normalizer = MacenkoNormalizer(backend="torch")
 
-        # Initialize TWO normalizers
-        self.gpu_normalizer = MacenkoNormalizer(backend="torch")  # Primary (Fast)
-        self.cpu_normalizer = MacenkoNormalizer(backend="numpy")  # Fallback (Stable)
+        # ✅ Set Standard H&E Reference Values (Converted to Float Tensors)
+        HERef_np = np.array([
+            [0.5626, 0.2159],
+            [0.7201, 0.8012],
+            [0.4062, 0.5581]
+        ])
+        maxC_np = np.array([1.9705, 1.0308])
 
-        self._fitted = False
-        self._fit_to_target()
+        self.normalizer.HERef = torch.from_numpy(HERef_np).float()
+        self.normalizer.maxC = torch.from_numpy(maxC_np).float()
 
-    def _fit_to_target(self) -> None:
-        """Fit on CPU (stable), then sync stats to GPU normalizer."""
-        if not os.path.exists(self.target_path):
-            print(f"[_StainNormTorch] Target not found: {self.target_path}")
-            return
-
-        target_bgr = cv2.imread(self.target_path)
-        if target_bgr is None:
-            print(f"[_StainNormTorch] Failed to load: {self.target_path}")
-            return
-
-        target_rgb = cv2.cvtColor(target_bgr, cv2.COLOR_BGR2RGB)
-
-        try:
-            # 1. Fit CPU Normalizer (Numpy) - Guaranteed to work
-            self.cpu_normalizer.fit(target_rgb)
-
-            # 2. Fit GPU Normalizer (Torch) - using data from CPU fit to be safe
-            # Convert target to tensor for torch backend
-            target_tensor = torch.from_numpy(target_rgb).permute(2, 0, 1)  # C,H,W
-            self.gpu_normalizer.HERef = torch.from_numpy(self.cpu_normalizer.HERef).float()
-            self.gpu_normalizer.maxC = torch.from_numpy(self.cpu_normalizer.maxC).float()
-
-            self._fitted = True
-            print(f"[_StainNormTorch] Successfully initialized (Hybrid Mode)")
-
-        except Exception as e:
-            print(f"[_StainNormTorch] Fit Error: {e}")
+        print(f"[_StainNormTorch] Initialized with Standard Values.")
 
     def _sync_to_device(self, device: torch.device) -> None:
-        """Ensure GPU normalizer stats are on the correct device."""
-        if not self._fitted:
-            return
+        """Ensure reference vectors are on the correct GPU."""
         try:
-            if self.gpu_normalizer.HERef.device != device:
-                self.gpu_normalizer.HERef = self.gpu_normalizer.HERef.to(device)
-            if self.gpu_normalizer.maxC.device != device:
-                self.gpu_normalizer.maxC = self.gpu_normalizer.maxC.to(device)
+            if self.normalizer.HERef.device != device:
+                self.normalizer.HERef = self.normalizer.HERef.to(device)
+            if self.normalizer.maxC.device != device:
+                self.normalizer.maxC = self.normalizer.maxC.to(device)
         except Exception:
             pass
 
-    def _normalize_on_cpu_fallback(self, img_tensor: torch.Tensor) -> torch.Tensor:
-        """Fallback function: Execute on CPU using Numpy backend."""
-        try:
-            # Move to CPU numpy
-            img_np = img_tensor.cpu().numpy().astype(np.uint8)
-            # Normalize
-            norm_np, _, _ = self.cpu_normalizer.normalize(I=img_np, stains=True)
-            # Move back to GPU
-            return torch.from_numpy(norm_np).to(img_tensor.device)
-        except Exception:
-            # If even CPU fails (e.g. empty white patch), return original
-            return img_tensor
-
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if not self._fitted:
-            return x
-
         device = x.device
         dtype = x.dtype
         batch_size = x.shape[0]
 
-        # Sync stats to current GPU
+        # Sync constants to current GPU
         self._sync_to_device(device)
 
-        # Prepare input: [B, H, W, C]
+        # Prepare input: [B, C, H, W] -> [B, H, W, C]
         x_255 = (x * 255).to(torch.uint8)
         x_hwc = x_255.permute(0, 2, 3, 1)
 
         normalized_list = []
 
-        # Disable AMP for stability during SVD/Eigh on GPU
+        # Disable AMP for stability
         with torch.amp.autocast(device_type="cuda", enabled=False):
             for i in range(batch_size):
                 img = x_hwc[i]
 
-                # Background check (Optional: Skip calculation if white)
+                # Skip background
                 if _is_background_torch(img):
                     normalized_list.append(img)
                     continue
 
-                # --- 1. Try GPU (Fast Path) ---
                 try:
-                    # stains=False returns tensor [H,W,C]
-                    norm_img = self.gpu_normalizer.normalize(I=img, stains=False)
+                    # Pure GPU Normalization
+                    norm_img = self.normalizer.normalize(I=img, stains=False)
                     normalized_list.append(norm_img)
-
-                # --- 2. Catch A100/Math Errors ---
-                except (RuntimeError, ValueError) as e:
-                    # e.g. "linalg.eigh failed", "kthvalue", etc.
-                    # Fallback to CPU for this single image
-                    norm_img = self._normalize_on_cpu_fallback(img)
-                    normalized_list.append(norm_img)
-
                 except Exception:
-                    # Any other error -> use original
                     normalized_list.append(img)
 
         # Reconstruct
@@ -202,14 +138,17 @@ class _StainNormTorch(nn.Module):
 
 
 class StainNormLayer(nn.Module):
-    def __init__(self, target_path: str = "data/templates/template_he.png") -> None:
+    def __init__(self, target_path: str = None) -> None:
         super().__init__()
-        self.target_path = target_path
-        self.cpu_worker = _StainNormNumpy(target_path)
-        self.gpu_worker = _StainNormTorch(target_path)
-        print(f"[StainNormLayer] Initialized. Target: {target_path}")
+
+        # Initialize workers independently
+        self.cpu_worker = _StainNormNumpy()
+        self.gpu_worker = _StainNormTorch()
+
+        print(f"[StainNormLayer] Mode: Standard Values (CPU/GPU Separated)")
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # ✅ Clean Forward (No Logging)
         if x.device.type == "cuda":
             return self.gpu_worker(x)
         else:

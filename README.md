@@ -57,14 +57,14 @@
 ### Data Preprocessing Command for Patch Mode
 `python src/preprocess.py --patch_size 512 --step_size 256`
 `python src/preprocess.py --stain reti --patch_size 224 --step_size 112 --output_dir data/processed_grading`
-`python src/preprocess.py --stain he --patch_size 512 --step_size 256 --output_dir data/processed_subtype`
+`python src/preprocess.py --stain he --patch_size 224 --step_size 112 --output_dir data/processed_subtype`
 
 `python src/run_janitor.py --task grading --model_path experiments/janitor_grading_20260202_143052/janitor_model_grading.pth`
 
 `python src/run_janitor.py \
     --task subtype \
     --input_dir data/processed_subtype_clean \
-    --model_path experiments/janitor_subtype_20260202_213526/janitor_model_subtype.pth \
+    --model_path experiments/janitor_subtype_20260204_233309/janitor_model_subtype.pth \
     --threshold 0.95`
 
 `python src/run_janitor.py \
@@ -74,7 +74,7 @@
     --threshold 0.95`
 
 `python tools/data_stats.py`
-`python src/train_janitor.py --task subtype --epochs 20`
+`python src/train_janitor.py --task subtype --epochs 10`
 
 # Default: 5 samples
 `python tools/check_stain.py`

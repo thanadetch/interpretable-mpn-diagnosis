@@ -89,27 +89,45 @@ class MPNDataset(Dataset):
             target_size = IMAGE_SIZE_GRADING  # 224 for Reticulin
 
         if is_training:
-            # Build base augmentation list
-            transform_list = [
-                transforms.Resize((target_size, target_size)),
-                transforms.RandomRotation(degrees=180),
-                transforms.RandomHorizontalFlip(p=0.5),
-                transforms.RandomVerticalFlip(p=0.5),
-            ]
-
-            # ColorJitter: Only for grading (Reticulin)
-            # Classification uses StainNorm downstream, so skip ColorJitter
-            if self.task == "grading":
-                transform_list.append(
+            if self.task == "classification":
+                # H&E images: Preserve cluster context with gentle cropping
+                transform_list = [
+                    transforms.RandomResizedCrop(
+                        size=(target_size, target_size),
+                        scale=(0.85, 1.0),
+                        ratio=(0.85, 1.15),
+                    ),
+                    transforms.ColorJitter(
+                        brightness=0.05,
+                        contrast=0.05,
+                        saturation=0.05,
+                        hue=0.02,
+                    ),
+                    transforms.RandomRotation(degrees=180),
+                    transforms.RandomHorizontalFlip(p=0.5),
+                    transforms.RandomVerticalFlip(p=0.5),
+                    transforms.ToTensor(),
+                ]
+            else:
+                # Reticulin images: Preserve texture density
+                transform_list = [
+                    transforms.RandomResizedCrop(
+                        size=(target_size, target_size),
+                        scale=(0.8, 1.0),
+                        ratio=(0.9, 1.1),
+                    ),
                     transforms.ColorJitter(
                         brightness=0.2,
                         contrast=0.2,
                         saturation=0.05,
                         hue=0.01,
-                    )
-                )
+                    ),
+                    transforms.RandomRotation(degrees=180),
+                    transforms.RandomHorizontalFlip(p=0.5),
+                    transforms.RandomVerticalFlip(p=0.5),
+                    transforms.ToTensor(),
+                ]
 
-            transform_list.append(transforms.ToTensor())
             return transforms.Compose(transform_list)
         else:
             return transforms.Compose(
