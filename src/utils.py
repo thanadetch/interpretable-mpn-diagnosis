@@ -2,6 +2,7 @@
 Utility functions for MPN research framework.
 Implements patient-level data splitting and reproducibility helpers.
 """
+
 import os
 import random
 import re
@@ -19,7 +20,9 @@ from config import (
     VAL_RATIO,
     TEST_RATIO,
     CLASS_MAP,
+    CLASS_MAP_INV,
     GRADE_MAP,
+    GRADE_MAP_INV,
 )
 
 
@@ -95,7 +98,9 @@ def _get_patient_folders(
                 except (ValueError, KeyError):
                     continue
             else:
-                raise ValueError(f"Unknown task: {task}. Use 'classification' or 'grading'")
+                raise ValueError(
+                    f"Unknown task: {task}. Use 'classification' or 'grading'"
+                )
 
             patient_folders.append((patient_folder, label))
 
@@ -188,8 +193,9 @@ def get_patient_split(
         file_ext = DATA_MODE_CONFIG[DEFAULT_DATA_MODE]["extension"]
 
     # Validate ratios
-    assert abs(train_ratio + val_ratio + test_ratio - 1.0) < 1e-6, \
+    assert abs(train_ratio + val_ratio + test_ratio - 1.0) < 1e-6, (
         "Split ratios must sum to 1.0"
+    )
 
     # Get all patient folders with labels
     patient_folders = _get_patient_folders(task, data_dir)
@@ -202,6 +208,7 @@ def get_patient_split(
 
     # Group patients by class/grade for manual stratification
     from collections import defaultdict
+
     patients_by_class: dict = defaultdict(list)
     for folder, label in patient_folders:
         patients_by_class[label].append(folder)
@@ -221,6 +228,9 @@ def get_patient_split(
         if n_patients == 0:
             continue
 
+        # Sort to ensure deterministic order before shuffling
+        class_patients.sort()
+
         # Shuffle patients for this class
         shuffled = class_patients.copy()
         random.shuffle(shuffled)
@@ -233,7 +243,9 @@ def get_patient_split(
             # 2 patients: 1 train, 1 test (skip val)
             train_folders.append(shuffled[0])
             test_folders.append(shuffled[1])
-            print(f"Warning: Class {label} has only 2 patients. Split: 1 train, 1 test (no val).")
+            print(
+                f"Warning: Class {label} has only 2 patients. Split: 1 train, 1 test (no val)."
+            )
         elif n_patients < 5:
             # 3-4 patients: ensure at least 1 in each split
             # Priority: test (for evaluation), train (for learning), val (for tuning)
@@ -255,8 +267,8 @@ def get_patient_split(
                 n_val = max(0, n_patients - n_test - n_train)
 
             test_folders.extend(shuffled[:n_test])
-            val_folders.extend(shuffled[n_test:n_test + n_val])
-            train_folders.extend(shuffled[n_test + n_val:])
+            val_folders.extend(shuffled[n_test : n_test + n_val])
+            train_folders.extend(shuffled[n_test + n_val :])
 
     # Convert folders to file paths
     def folders_to_files(folder_list: List[Path]) -> List[Tuple[Path, int]]:
@@ -280,9 +292,9 @@ def get_patient_split(
     test_files = folders_to_files(test_folders)
 
     # Print split statistics
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"Data Split Statistics (Task: {task})")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
     print(f"Data directory: {data_dir}")
     print(f"File extension: .{file_ext}")
     print(f"Total patients: {len(patient_folders)}")
@@ -290,12 +302,29 @@ def get_patient_split(
     print(f"Val patients:   {len(val_folders)} | Images: {len(val_files)}")
     print(f"Test patients:  {len(test_folders)} | Images: {len(test_files)}")
 
-    # Print per-class distribution in test set
+    # Print per-class distribution for all splits with readable names
+    label_map_inv = CLASS_MAP_INV if task == "classification" else GRADE_MAP_INV
+
+    train_class_counts: dict = defaultdict(int)
+    for _, label in train_files:
+        train_class_counts[label] += 1
+
+    val_class_counts: dict = defaultdict(int)
+    for _, label in val_files:
+        val_class_counts[label] += 1
+
     test_class_counts: dict = defaultdict(int)
     for _, label in test_files:
         test_class_counts[label] += 1
-    print(f"Test set class distribution: {dict(test_class_counts)}")
-    print(f"{'='*60}\n")
+
+    # Convert integer keys to readable names (sorted by original int key)
+    def to_named_dist(counts: dict) -> dict:
+        return {label_map_inv[k]: counts[k] for k in sorted(counts.keys())}
+
+    print(f"Train Class Dist: {to_named_dist(train_class_counts)}")
+    print(f"Val   Class Dist: {to_named_dist(val_class_counts)}")
+    print(f"Test  Class Dist: {to_named_dist(test_class_counts)}")
+    print(f"{'=' * 60}\n")
 
     return train_files, val_files, test_files
 
@@ -390,4 +419,3 @@ def get_num_classes(task: str) -> int:
         return len(GRADE_MAP)
     else:
         raise ValueError(f"Unknown task: {task}")
-

@@ -96,7 +96,7 @@ class MPNDataset(Dataset):
                     brightness=0.2,
                     contrast=0.2,
                     saturation=0.2,
-                    hue=0.02,
+                    hue=0.05,
                 )
             else:  # grading (Reticulin)
                 # Reticulin silver stains: minimal saturation/hue (monochromatic black fibers)
@@ -110,9 +110,9 @@ class MPNDataset(Dataset):
             return transforms.Compose(
                 [
                     transforms.RandomResizedCrop(
-                        (target_size, target_size), scale=(0.4, 1.0)
+                        (target_size, target_size), scale=(0.85, 1.0)
                     ),
-                    transforms.RandomRotation(degrees=15),
+                    transforms.RandomRotation(degrees=180),
                     transforms.RandomHorizontalFlip(p=0.5),
                     transforms.RandomVerticalFlip(p=0.5),
                     color_jitter,

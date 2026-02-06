@@ -17,7 +17,7 @@ from torch.amp import GradScaler
 from sklearn.metrics import fbeta_score
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
-from torch.utils.data import DataLoader, WeightedRandomSampler
+from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from config import (
@@ -34,7 +34,7 @@ from config import (
 from dataset import MPNDataset
 from model import get_model, print_model_summary
 from utils import (
-    get_class_weights,
+    get_loss_weights,
     get_num_classes,
     get_patient_split,
     set_seed,
@@ -153,7 +153,7 @@ def create_dataloaders(
     seed: int,
     data_dir: Path,
     file_ext: str,
-) -> Tuple[DataLoader, DataLoader, DataLoader, int]:
+) -> Tuple[DataLoader, DataLoader, DataLoader, int, torch.Tensor]:
     """
     Create train/val/test dataloaders with WeightedRandomSampler for training.
 
@@ -166,7 +166,7 @@ def create_dataloaders(
         file_ext: File extension to filter (e.g., 'tif', 'png')
 
     Returns:
-        Tuple of (train_loader, val_loader, test_loader, num_classes)
+        Tuple of (train_loader, val_loader, test_loader, num_classes, loss_weights)
     """
     # Get patient-level split
     train_files, val_files, test_files = get_patient_split(
@@ -181,21 +181,16 @@ def create_dataloaders(
     val_dataset = MPNDataset(val_files, task=task, is_training=False)
     test_dataset = MPNDataset(test_files, task=task, is_training=False)
 
-    # Calculate sample weights for handling class imbalance
-    sample_weights = get_class_weights(train_files, num_classes)
-
-    # Create WeightedRandomSampler for training
-    sampler = WeightedRandomSampler(
-        weights=sample_weights,
-        num_samples=len(train_dataset),
-        replacement=True,
-    )
+    # NOTE: WeightedRandomSampler DISABLED to prevent train/val distribution shift.
+    # Instead, we use Class-Weighted CrossEntropyLoss to handle class imbalance.
+    # This penalizes minority class errors more without changing the data distribution.
+    loss_weights = get_loss_weights(train_files, num_classes)
 
     # Create DataLoaders
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
-        sampler=sampler,  # Use sampler instead of shuffle
+        shuffle=True,  # Use shuffle instead of sampler
         num_workers=num_workers,
         pin_memory=True,
         drop_last=True,
@@ -217,7 +212,7 @@ def create_dataloaders(
         pin_memory=True,
     )
 
-    return train_loader, val_loader, test_loader, num_classes
+    return train_loader, val_loader, test_loader, num_classes, loss_weights
 
 
 def train_one_epoch(
@@ -366,6 +361,19 @@ def train(
     # Set seed for reproducibility
     set_seed(args.seed)
 
+    # Create experiment directory with data mode info
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    exp_name = f"{args.task}_{args.model}_{args.data_mode}_{timestamp}"
+    if args.postfix:
+        exp_name = f"{exp_name}{args.postfix}"
+    exp_dir = EXPERIMENTS_DIR / exp_name
+    exp_dir.mkdir(parents=True, exist_ok=True)
+
+    # Start logging to file
+    log_path = exp_dir / "train_log.txt"
+    sys.stdout = TeeLogger(log_path)
+    print(f"📄 Logging training output to: {log_path}")
+
     # Set device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"\nUsing device: {device}")
@@ -378,21 +386,26 @@ def train(
     print(f"Data mode: {args.data_mode} ({mode_config['description']})")
 
     # Create dataloaders
-    train_loader, val_loader, test_loader, num_classes = create_dataloaders(
-        task=args.task,
-        batch_size=args.batch_size,
-        num_workers=args.num_workers,
-        seed=args.seed,
-        data_dir=data_dir,
-        file_ext=file_ext,
+    train_loader, val_loader, test_loader, num_classes, loss_weights = (
+        create_dataloaders(
+            task=args.task,
+            batch_size=args.batch_size,
+            num_workers=args.num_workers,
+            seed=args.seed,
+            data_dir=data_dir,
+            file_ext=file_ext,
+        )
     )
 
     # Create model
     model = get_model(args.model, num_classes, device, use_cbam=args.cbam)
     print_model_summary(model, args.model)
 
-    # CrossEntropyLoss with label smoothing (class balance handled by WeightedRandomSampler)
-    criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
+    # Class-Weighted CrossEntropyLoss with label smoothing
+    # Weights penalize minority class errors more without changing data distribution
+    loss_weights = loss_weights.to(device)
+    print(f"⚖️ Class Weights: {loss_weights}")
+    criterion = nn.CrossEntropyLoss(weight=loss_weights, label_smoothing=0.1)
 
     # === Freeze/Unfreeze based on --freeze_epochs ===
     total_params = sum(p.numel() for p in model.parameters())
@@ -441,26 +454,13 @@ def train(
 
     scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=1e-6)
 
-    # Create experiment directory with data mode info
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    exp_name = f"{args.task}_{args.model}_{args.data_mode}_{timestamp}"
-    if args.postfix:
-        exp_name = f"{exp_name}{args.postfix}"
-    exp_dir = EXPERIMENTS_DIR / exp_name
-    exp_dir.mkdir(parents=True, exist_ok=True)
-
-    # Start logging to file
-    log_path = exp_dir / "train_log.txt"
-    sys.stdout = TeeLogger(log_path)
-    print(f"📄 Logging training output to: {log_path}")
-
     # Log training configuration
-    print("\n" + "="*40)
+    print("\n" + "=" * 40)
     print("🚀 Training Configuration:")
-    print("="*40)
+    print("=" * 40)
     for key, value in vars(args).items():
         print(f"{key:20}: {value}")
-    print("="*40 + "\n")
+    print("=" * 40 + "\n")
 
     print(f"Experiment directory: {exp_dir}")
 

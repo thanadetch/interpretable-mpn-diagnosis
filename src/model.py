@@ -239,15 +239,7 @@ def get_model(
 
         # Modify the final fully connected layer
         in_features = model.fc.in_features
-        if use_cbam:
-            # CBAM recipe: add Dropout for regularization
-            model.fc = nn.Sequential(
-                nn.Dropout(p=0.25),
-                nn.Linear(in_features, num_classes),
-            )
-        else:
-            # Baseline recipe: no Dropout
-            model.fc = nn.Linear(in_features, num_classes)
+        model.fc = nn.Linear(in_features, num_classes)
 
     elif model_name == "efficientnet_b0":
         # Load pretrained EfficientNet-B0
@@ -257,10 +249,7 @@ def get_model(
 
         # Modify the classifier layer
         in_features = model.classifier[1].in_features
-        model.classifier = nn.Sequential(
-            nn.Dropout(p=0.2, inplace=True),
-            nn.Linear(in_features, num_classes),
-        )
+        model.classifier = nn.Linear(in_features, num_classes)
 
     elif model_name == "densenet121":
         # Load pretrained DenseNet121 - better for texture/fiber detection
@@ -273,15 +262,7 @@ def get_model(
 
         # Modify the classifier layer
         in_features = model.classifier.in_features
-        if use_cbam:
-            # CBAM recipe: add Dropout for regularization
-            model.classifier = nn.Sequential(
-                nn.Dropout(p=0.25),
-                nn.Linear(in_features, num_classes),
-            )
-        else:
-            # Baseline recipe: no Dropout
-            model.classifier = nn.Linear(in_features, num_classes)
+        model.classifier = nn.Linear(in_features, num_classes)
 
     else:
         raise ValueError(
