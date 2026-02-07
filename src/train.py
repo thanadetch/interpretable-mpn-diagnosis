@@ -34,6 +34,7 @@ from config import (
 from dataset import MPNDataset
 from model import get_model, print_model_summary
 from utils import (
+    FocalLoss,
     get_loss_weights,
     get_num_classes,
     get_patient_split,
@@ -181,19 +182,16 @@ def create_dataloaders(
     val_dataset = MPNDataset(val_files, task=task, is_training=False)
     test_dataset = MPNDataset(test_files, task=task, is_training=False)
 
-    # NOTE: WeightedRandomSampler DISABLED to prevent train/val distribution shift.
-    # Instead, we use Class-Weighted CrossEntropyLoss to handle class imbalance.
-    # This penalizes minority class errors more without changing the data distribution.
+    # Calculate class weights for Focal Loss
     loss_weights = get_loss_weights(train_files, num_classes)
 
     # Create DataLoaders
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
-        shuffle=True,  # Use shuffle instead of sampler
+        shuffle=True,
         num_workers=num_workers,
         pin_memory=True,
-        drop_last=True,
     )
 
     val_loader = DataLoader(
@@ -401,11 +399,11 @@ def train(
     model = get_model(args.model, num_classes, device, use_cbam=args.cbam)
     print_model_summary(model, args.model)
 
-    # Class-Weighted CrossEntropyLoss with label smoothing
-    # Weights penalize minority class errors more without changing data distribution
+    # Focal Loss with class weights
+    # Focuses on hard examples (gamma=2.0) while using class weights for imbalance
     loss_weights = loss_weights.to(device)
-    print(f"⚖️ Class Weights: {loss_weights}")
-    criterion = nn.CrossEntropyLoss(weight=loss_weights, label_smoothing=0.1)
+    print(f"⚖️ Using Focal Loss (gamma=2.0) with Class Weights: {loss_weights}")
+    criterion = FocalLoss(alpha=loss_weights, gamma=2.0)
 
     # === Freeze/Unfreeze based on --freeze_epochs ===
     total_params = sum(p.numel() for p in model.parameters())

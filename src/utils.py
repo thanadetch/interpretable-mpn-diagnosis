@@ -11,6 +11,7 @@ from typing import List, Tuple
 
 import numpy as np
 import torch
+import torch.nn as nn
 
 from config import (
     DATA_MODE_CONFIG,
@@ -419,3 +420,35 @@ def get_num_classes(task: str) -> int:
         return len(GRADE_MAP)
     else:
         raise ValueError(f"Unknown task: {task}")
+
+
+class FocalLoss(nn.Module):
+    """
+    Focal Loss for Dense Object Detection (Lin et al., 2017).
+    Focuses training on hard examples by down-weighting easy positives/negatives.
+    """
+
+    def __init__(self, alpha=None, gamma=2.0, reduction="mean"):
+        super(FocalLoss, self).__init__()
+        self.alpha = alpha  # Class weights
+        self.gamma = gamma  # Focusing parameter (higher = more focus on hard examples)
+        self.reduction = reduction
+
+    def forward(self, inputs, targets):
+        # Calculate standard Cross Entropy Loss (without reduction)
+        ce_loss = torch.nn.functional.cross_entropy(
+            inputs, targets, reduction="none", weight=self.alpha
+        )
+
+        # Calculate probability of the true class (pt = exp(-ce_loss))
+        pt = torch.exp(-ce_loss)
+
+        # Calculate Focal term: (1 - pt)^gamma
+        focal_loss = ((1 - pt) ** self.gamma) * ce_loss
+
+        if self.reduction == "mean":
+            return focal_loss.mean()
+        elif self.reduction == "sum":
+            return focal_loss.sum()
+        else:
+            return focal_loss
