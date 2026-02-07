@@ -14,7 +14,7 @@ import torch
 import torch.nn as nn
 import torch.nn.utils as utils
 from torch.amp import GradScaler
-from sklearn.metrics import fbeta_score
+from sklearn.metrics import cohen_kappa_score, fbeta_score
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.utils.data import DataLoader
@@ -34,6 +34,7 @@ from config import (
 from dataset import MPNDataset
 from model import get_model, print_model_summary
 from utils import (
+    EMDLoss,
     FocalLoss,
     get_loss_weights,
     get_num_classes,
@@ -142,6 +143,21 @@ def parse_args() -> argparse.Namespace:
         "--cbam",
         action="store_true",
         help="Enable CBAM Attention",
+    )
+
+    parser.add_argument(
+        "--loss",
+        type=str,
+        default="default",
+        choices=["default", "ce", "ce_weighted", "focal", "emd"],
+        help=(
+            "Loss function to use: "
+            "'default' (EMD for grading, Focal for classification), "
+            "'ce' (CrossEntropyLoss), "
+            "'ce_weighted' (Weighted CrossEntropyLoss), "
+            "'focal' (FocalLoss with class weights), "
+            "'emd' (EMD Loss for ordinal regression)"
+        ),
     )
 
     return parser.parse_args()
@@ -285,7 +301,8 @@ def validate(
     criterion: nn.Module,
     device: torch.device,
     num_classes: int,
-) -> Tuple[float, float, float]:
+    task: str = "classification",
+) -> Tuple[float, float, float, float]:
     """
     Validate the model.
 
@@ -297,7 +314,7 @@ def validate(
         num_classes: Number of classes for F2-Score calculation
 
     Returns:
-        Tuple of (average_loss, accuracy, f2_score_macro)
+        Tuple of (average_loss, accuracy, f2_score_macro, quadratic_weighted_kappa)
     """
     model.eval()
 
@@ -341,7 +358,11 @@ def validate(
         zero_division=0,
     )
 
-    return epoch_loss, epoch_acc, epoch_f2
+    # Calculate Quadratic Weighted Kappa (for ordinal regression evaluation)
+    # QWK penalizes predictions that are further from the true label more heavily
+    epoch_qwk = cohen_kappa_score(all_labels, all_preds, weights="quadratic")
+
+    return epoch_loss, epoch_acc, epoch_f2, epoch_qwk
 
 
 def train(
@@ -399,11 +420,31 @@ def train(
     model = get_model(args.model, num_classes, device, use_cbam=args.cbam)
     print_model_summary(model, args.model)
 
-    # Focal Loss with class weights
-    # Focuses on hard examples (gamma=2.0) while using class weights for imbalance
-    loss_weights = loss_weights.to(device)
-    print(f"⚖️ Using Focal Loss (gamma=2.0) with Class Weights: {loss_weights}")
-    criterion = FocalLoss(alpha=loss_weights, gamma=2.0)
+    # === Loss Function Selection ===
+    # Resolve 'default' to task-specific loss
+    loss_type = args.loss
+    if loss_type == "default":
+        loss_type = "emd" if args.task == "grading" else "focal"
+
+    # Initialize criterion based on loss_type
+    if loss_type == "ce":
+        print("⚖️ Using CrossEntropyLoss")
+        criterion = nn.CrossEntropyLoss()
+    elif loss_type == "ce_weighted":
+        loss_weights = loss_weights.to(device)
+        print(
+            f"\n⚖️ [BASELINE+] Using Weighted CrossEntropyLoss with weights: {loss_weights}"
+        )
+        criterion = nn.CrossEntropyLoss(weight=loss_weights)
+    elif loss_type == "focal":
+        loss_weights = loss_weights.to(device)
+        print(f"⚖️ Using Focal Loss (gamma=2.0) with Class Weights: {loss_weights}")
+        criterion = FocalLoss(alpha=loss_weights, gamma=2.0)
+    elif loss_type == "emd":
+        print(f"⚖️ Using EMD Loss (Ordinal Regression) for {args.task}")
+        criterion = EMDLoss(num_classes=num_classes)
+    else:
+        raise ValueError(f"Unknown loss type: {loss_type}")
 
     # === Freeze/Unfreeze based on --freeze_epochs ===
     total_params = sum(p.numel() for p in model.parameters())
@@ -463,7 +504,8 @@ def train(
     print(f"Experiment directory: {exp_dir}")
 
     # Training loop
-    best_val_f2 = 0.0
+    # Initialize trackers (best_val_metric stores F2 for classification, QWK for grading)
+    best_val_metric = -float("inf")
     best_val_acc = 0.0
     best_epoch = 0
     history: Dict[str, list] = {
@@ -472,13 +514,17 @@ def train(
         "val_loss": [],
         "val_acc": [],
         "val_f2": [],
+        "val_qwk": [],
     }
 
     scaler = GradScaler(enabled=(device.type == "cuda"))
 
     print(f"\n{'=' * 60}")
     print(f"Starting training: {args.task} with {args.model}")
-    print(f"Model selection metric: F2-Score (Macro, beta=2)")
+    if args.task == "grading":
+        print(f"Model selection metric: QWK (Quadratic Weighted Kappa)")
+    else:
+        print(f"Model selection metric: F2-Score (Macro, beta=2)")
     print(f"{'=' * 60}\n")
 
     for epoch in range(args.epochs):
@@ -513,9 +559,9 @@ def train(
             model, train_loader, criterion, optimizer, scaler, device
         )
 
-        # Validate (now returns F2-Score as well)
-        val_loss, val_acc, val_f2 = validate(
-            model, val_loader, criterion, device, num_classes
+        # Validate (returns F2-Score and QWK)
+        val_loss, val_acc, val_f2, val_qwk = validate(
+            model, val_loader, criterion, device, num_classes, task=args.task
         )
 
         # Step scheduler
@@ -527,16 +573,31 @@ def train(
         history["val_loss"].append(val_loss)
         history["val_acc"].append(val_acc)
         history["val_f2"].append(val_f2)
+        history["val_qwk"].append(val_qwk)
 
         # Print epoch summary
-        print(
-            f"  Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.2f}%\n"
-            f"  Val Loss:   {val_loss:.4f} | Val Acc:   {val_acc:.2f}% | Val F2: {val_f2:.4f}"
-        )
+        if args.task == "grading":
+            print(
+                f"  Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.2f}%\n"
+                f"  Val Loss:   {val_loss:.4f} | Val Acc:   {val_acc:.2f}% | Val F2: {val_f2:.4f} | Val QWK: {val_qwk:.4f}"
+            )
+        else:
+            print(
+                f"  Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.2f}%\n"
+                f"  Val Loss:   {val_loss:.4f} | Val Acc:   {val_acc:.2f}% | Val F2: {val_f2:.4f}"
+            )
 
-        # Save best model based on F2-Score (not accuracy)
-        if val_f2 > best_val_f2:
-            best_val_f2 = val_f2
+        # Determine the primary metric for model selection
+        if args.task == "grading":
+            current_metric = val_qwk
+            metric_name = "QWK"
+        else:
+            current_metric = val_f2
+            metric_name = "F2"
+
+        # Save best model if current metric improves
+        if current_metric > best_val_metric:
+            best_val_metric = current_metric
             best_val_acc = val_acc
             best_epoch = epoch + 1
 
@@ -544,14 +605,17 @@ def train(
                 "epoch": epoch + 1,
                 "model_state_dict": model.state_dict(),
                 "optimizer_state_dict": optimizer.state_dict(),
-                "val_f2": val_f2,
+                "best_metric": best_val_metric,
+                "metric_name": metric_name,
                 "val_acc": val_acc,
                 "val_loss": val_loss,
                 "args": vars(args),
             }
 
             torch.save(checkpoint, exp_dir / "best_model.pth")
-            print(f"  [*] Saved best model (Val F2: {val_f2:.4f}, Acc: {val_acc:.2f}%)")
+            print(
+                f"  [*] Saved best model (Val {metric_name}: {best_val_metric:.4f}, Acc: {best_val_acc:.2f}%)"
+            )
 
         print()
 
@@ -568,15 +632,48 @@ def train(
     # Save training history
     torch.save(history, exp_dir / "history.pth")
 
+    # Determine metric name for final logging
+    metric_name = "QWK" if args.task == "grading" else "F2"
+
     print(f"\n{'=' * 60}")
-    print(f"Training completed!")
-    print(f"Best validation F2-Score: {best_val_f2:.4f} (Epoch {best_epoch})")
+    print("Training completed!")
+    print(f"Best validation {metric_name}: {best_val_metric:.4f} (Epoch {best_epoch})")
     print(f"Best validation Accuracy: {best_val_acc:.2f}%")
     print(f"Model saved to: {exp_dir}")
+    print("=" * 60 + "\n")
+
+    # ==========================================
+    # 🧪 Testing Phase (using Best Model)
+    # ==========================================
+    print(f"\n{'=' * 60}")
+    print(f"🚀 Starting Test Evaluation (Task: {args.task})")
+    print(f"{'=' * 60}")
+
+    # Load the best model weights
+    best_model_path = exp_dir / "best_model.pth"
+    if best_model_path.exists():
+        print(f"[*] Loading best model from: {best_model_path}")
+        checkpoint = torch.load(best_model_path)
+        model.load_state_dict(checkpoint["model_state_dict"])
+    else:
+        print("[!] Warning: Best model not found. Using final model weights.")
+
+    # Run validation on Test Set
+    test_loss, test_acc, test_f2, test_qwk = validate(
+        model, test_loader, criterion, device, num_classes, task=args.task
+    )
+
+    print(f"\n🏆 Final Test Results ({args.task}):")
+    print(f"   Test Loss: {test_loss:.4f}")
+    print(f"   Test Acc:  {test_acc:.2f}%")
+    if args.task == "grading":
+        print(f"   Test QWK:  {test_qwk:.4f} (Quadratic Weighted Kappa)")
+    else:
+        print(f"   Test F2:   {test_f2:.4f} (Macro F2-Score)")
     print(f"{'=' * 60}\n")
 
     return {
-        "best_val_f2": best_val_f2,
+        "best_val_metric": best_val_metric,
         "best_val_acc": best_val_acc,
         "best_epoch": best_epoch,
         "exp_dir": str(exp_dir),

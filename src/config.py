@@ -119,4 +119,4 @@ IMAGE_EXTENSIONS: tuple = (".tif", ".tiff", ".png", ".jpg", ".jpeg")
 # ============================================================================
 # Model Configuration
 # ============================================================================
-SUPPORTED_MODELS: tuple = ("resnet18", "efficientnet_b0", "densenet121")
+SUPPORTED_MODELS: tuple = ("resnet18", "densenet121")

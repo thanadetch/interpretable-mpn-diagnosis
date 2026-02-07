@@ -1,6 +1,6 @@
 """
 Model factory for MPN Classification and Fibrosis Grading.
-Supports ResNet18, EfficientNet-B0, and DenseNet121 with pretrained ImageNet weights.
+Supports ResNet18 and DenseNet121 with pretrained ImageNet weights.
 """
 
 import torch
@@ -167,7 +167,6 @@ def apply_cbam_to_densenet(model: nn.Module) -> nn.Module:
     Returns:
         The modified model with CBAM attention inserted after dense blocks
     """
-    from torchvision.models.densenet import _DenseBlock, _Transition
 
     # DenseNet121 channel counts after each block/transition
     # Initial: 64, after conv0/pool0: 64
@@ -217,7 +216,7 @@ def get_model(
     Factory function to create a model with pretrained weights.
 
     Args:
-        model_name: Name of the model ('resnet18', 'efficientnet_b0', or 'densenet121')
+        model_name: Name of the model ('resnet18' or 'densenet121')
         num_classes: Number of output classes
         device: Device to move the model to
         use_cbam: Whether to apply CBAM attention (supported for resnet18 and densenet121)
@@ -241,16 +240,6 @@ def get_model(
         in_features = model.fc.in_features
         model.fc = nn.Linear(in_features, num_classes)
 
-    elif model_name == "efficientnet_b0":
-        # Load pretrained EfficientNet-B0
-        model = models.efficientnet_b0(
-            weights=models.EfficientNet_B0_Weights.IMAGENET1K_V1
-        )
-
-        # Modify the classifier layer
-        in_features = model.classifier[1].in_features
-        model.classifier = nn.Linear(in_features, num_classes)
-
     elif model_name == "densenet121":
         # Load pretrained DenseNet121 - better for texture/fiber detection
         model = models.densenet121(weights=models.DenseNet121_Weights.IMAGENET1K_V1)
@@ -266,8 +255,7 @@ def get_model(
 
     else:
         raise ValueError(
-            f"Unsupported model: {model_name}. "
-            f"Choose from: 'resnet18', 'efficientnet_b0', 'densenet121'"
+            f"Unsupported model: {model_name}. Choose from: 'resnet18', 'densenet121'"
         )
 
     # Move model to device
@@ -290,9 +278,6 @@ def get_target_layer(model: nn.Module, model_name: str):
     if model_name == "resnet18":
         # Last convolutional block in ResNet
         return model.layer4[-1]
-    elif model_name == "efficientnet_b0":
-        # Last convolutional layer in EfficientNet
-        return model.features[-1]
     elif model_name == "densenet121":
         # Last DenseBlock in DenseNet (features.denseblock4)
         return model.features.denseblock4

@@ -12,6 +12,7 @@ from typing import List, Tuple
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from config import (
     DATA_MODE_CONFIG,
@@ -452,3 +453,50 @@ class FocalLoss(nn.Module):
             return focal_loss.sum()
         else:
             return focal_loss
+
+
+class EMDLoss(nn.Module):
+    """
+    Earth Mover's Distance (EMD) Loss for Ordinal Regression.
+    Calculates the squared error between the cumulative distribution functions (CDFs).
+
+    This loss is ideal for ordinal problems like fibrosis grading (G0-G3) where
+    penalizing distant errors (G0 vs G3) more than neighbor errors (G2 vs G3)
+    is desirable.
+    """
+
+    def __init__(self, num_classes: int = 4):
+        super(EMDLoss, self).__init__()
+        self.num_classes = num_classes
+
+    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        """
+        Calculate EMD Loss.
+
+        Args:
+            logits: Model output logits of shape [Batch, NumClasses]
+            targets: Ground truth labels of shape [Batch]
+
+        Returns:
+            Scalar loss value
+        """
+        # Convert logits to probabilities (Softmax)
+        probs = F.softmax(logits, dim=1)
+
+        # Calculate predicted CDF (Cumulative Sum)
+        # pred_cdf shape: [Batch, NumClasses]
+        pred_cdf = torch.cumsum(probs, dim=1)
+
+        # Create Target CDF
+        # For target class k, true_cdf[i] = 1 if i >= k, else 0
+        # Example: If target is 2 (G2) out of 4 classes:
+        # Class: 0  1  2  3
+        # CDF:   0  0  1  1  (P(y<=i) = 1 if target <= i)
+        true_cdf = torch.zeros_like(pred_cdf)
+        for i in range(self.num_classes):
+            # P(y <= i) is 1 if target <= i, else 0
+            true_cdf[:, i] = (targets <= i).float()
+
+        # Calculate Squared EMD (Wasserstein-2 distance for discrete ordinal)
+        loss = torch.mean(torch.sum((pred_cdf - true_cdf) ** 2, dim=1))
+        return loss
