@@ -6,6 +6,7 @@ Usage:
     python src/explain.py --checkpoint experiments/xxx/best_model.pth --data_mode resize --num_samples 5
     python src/explain.py --checkpoint experiments/xxx/best_model.pth --data_mode patch --image_path "data/processed/ET/ET1 G1/1_r0c0.png"
 """
+
 import argparse
 from pathlib import Path
 from typing import Optional, Tuple
@@ -34,6 +35,7 @@ try:
     from pytorch_grad_cam import GradCAM
     from pytorch_grad_cam.utils.image import show_cam_on_image
     from pytorch_grad_cam.utils.model_targets import ClassifierOutputTarget
+
     GRADCAM_AVAILABLE = True
 except ImportError:
     GRADCAM_AVAILABLE = False
@@ -97,7 +99,9 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def load_checkpoint(checkpoint_path: str, device: torch.device) -> Tuple[torch.nn.Module, dict]:
+def load_checkpoint(
+    checkpoint_path: str, device: torch.device
+) -> Tuple[torch.nn.Module, dict]:
     """
     Load model from checkpoint.
 
@@ -114,8 +118,11 @@ def load_checkpoint(checkpoint_path: str, device: torch.device) -> Tuple[torch.n
     # Get number of classes based on task
     num_classes = get_num_classes(args["task"])
 
-    # Create model
-    model = get_model(args["model"], num_classes, device)
+    # Extract CBAM flag from checkpoint args (default False for backward compatibility)
+    use_cbam = args.get("cbam", False)
+
+    # Create model with same architecture as training (including CBAM if used)
+    model = get_model(args["model"], num_classes, device, use_cbam=use_cbam)
     model.load_state_dict(checkpoint["model_state_dict"])
     model.eval()
 
@@ -130,20 +137,24 @@ def get_transforms() -> Tuple[transforms.Compose, transforms.Compose]:
         Tuple of (preprocess_transform, display_transform)
     """
     # Transform for model input
-    preprocess = transforms.Compose([
-        transforms.Resize((IMAGE_SIZE, IMAGE_SIZE)),
-        transforms.ToTensor(),
-        transforms.Normalize(
-            mean=[0.485, 0.456, 0.406],
-            std=[0.229, 0.224, 0.225],
-        ),
-    ])
+    preprocess = transforms.Compose(
+        [
+            transforms.Resize((IMAGE_SIZE, IMAGE_SIZE)),
+            transforms.ToTensor(),
+            transforms.Normalize(
+                mean=[0.485, 0.456, 0.406],
+                std=[0.229, 0.224, 0.225],
+            ),
+        ]
+    )
 
     # Transform for display (just resize, no normalization)
-    display = transforms.Compose([
-        transforms.Resize((IMAGE_SIZE, IMAGE_SIZE)),
-        transforms.ToTensor(),
-    ])
+    display = transforms.Compose(
+        [
+            transforms.Resize((IMAGE_SIZE, IMAGE_SIZE)),
+            transforms.ToTensor(),
+        ]
+    )
 
     return preprocess, display
 
@@ -285,7 +296,9 @@ def explain(args: argparse.Namespace) -> None:
     """
     if not GRADCAM_AVAILABLE:
         print("\nError: pytorch-grad-cam is required for this module.")
-        print("Install with: pip install git+https://github.com/jacobgil/pytorch-grad-cam.git")
+        print(
+            "Install with: pip install git+https://github.com/jacobgil/pytorch-grad-cam.git"
+        )
         return
 
     set_seed(args.seed)
@@ -320,7 +333,7 @@ def explain(args: argparse.Namespace) -> None:
     else:
         # Use experiment-specific directory based on checkpoint path
         experiment_name = checkpoint_path.parent.name
-        output_dir = FIGURES_DIR / experiment_name
+        output_dir = FIGURES_DIR / f"{experiment_name}_gradcam"
 
     # Create output directory
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -381,7 +394,9 @@ def explain(args: argparse.Namespace) -> None:
 
     # Print summary based on data mode
     if args.data_mode == "patch":
-        print("\nNote: In 'patch' mode, Grad-CAM shows attention on individual patches.")
+        print(
+            "\nNote: In 'patch' mode, Grad-CAM shows attention on individual patches."
+        )
         print("This helps identify which morphological features the model focuses on.")
     else:
         print("\nNote: In 'resize' mode, Grad-CAM shows attention on the whole image.")
@@ -396,4 +411,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
