@@ -626,6 +626,9 @@ def evaluate(args: argparse.Namespace) -> Dict:
     # Extract experiment name from checkpoint path
     experiment_name = checkpoint_path.parent.name
 
+    # Always append level and aggregation to folder name for consistent organization
+    experiment_name = f"{experiment_name}_{args.level}_{args.aggregation}"
+
     # Create experiment-specific output directories
     exp_figures_dir = FIGURES_DIR / experiment_name
     exp_reports_dir = REPORTS_DIR / experiment_name
