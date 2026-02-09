@@ -10,22 +10,25 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Tuple
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.utils as utils
 from torch.amp import GradScaler
-from sklearn.metrics import cohen_kappa_score, fbeta_score
+from sklearn.metrics import cohen_kappa_score, confusion_matrix, fbeta_score
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, WeightedRandomSampler
 from tqdm import tqdm
 
 from config import (
     BATCH_SIZE,
+    CLASS_MAP_INV,
     DATA_MODE_CONFIG,
     DEFAULT_DATA_MODE,
     EPOCHS,
     EXPERIMENTS_DIR,
+    GRADE_MAP_INV,
     LR,
     NUM_WORKERS,
     SEED,
@@ -36,10 +39,19 @@ from model import get_model, print_model_summary
 from utils import (
     EMDLoss,
     FocalLoss,
+    get_class_weights,
     get_loss_weights,
     get_num_classes,
     get_patient_split,
     set_seed,
+)
+
+torch.serialization.add_safe_globals(
+    [
+        np._core.multiarray.scalar,
+        np.dtype,
+        np.dtypes.Float64DType,
+    ]
 )
 
 
@@ -160,6 +172,12 @@ def parse_args() -> argparse.Namespace:
         ),
     )
 
+    parser.add_argument(
+        "--sampler",
+        action="store_true",
+        help="Enable WeightedRandomSampler (Recommended for imbalanced tasks like grading)",
+    )
+
     return parser.parse_args()
 
 
@@ -170,9 +188,10 @@ def create_dataloaders(
     seed: int,
     data_dir: Path,
     file_ext: str,
+    use_sampler: bool = False,
 ) -> Tuple[DataLoader, DataLoader, DataLoader, int, torch.Tensor]:
     """
-    Create train/val/test dataloaders with WeightedRandomSampler for training.
+    Create train/val/test dataloaders with optional WeightedRandomSampler.
 
     Args:
         task: Either 'classification' or 'grading'
@@ -181,6 +200,7 @@ def create_dataloaders(
         seed: Random seed
         data_dir: Root data directory containing class folders
         file_ext: File extension to filter (e.g., 'tif', 'png')
+        use_sampler: If True, use WeightedRandomSampler for training
 
     Returns:
         Tuple of (train_loader, val_loader, test_loader, num_classes, loss_weights)
@@ -201,11 +221,26 @@ def create_dataloaders(
     # Calculate class weights for Focal Loss
     loss_weights = get_loss_weights(train_files, num_classes)
 
+    # Create sampler if requested
+    if use_sampler:
+        sample_weights = get_class_weights(train_files, num_classes)
+        sampler = WeightedRandomSampler(
+            weights=sample_weights,
+            num_samples=len(train_files),
+            replacement=True,
+        )
+        shuffle = False
+        print("⚖️  Using WeightedRandomSampler for balanced training")
+    else:
+        sampler = None
+        shuffle = True
+
     # Create DataLoaders
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
-        shuffle=True,
+        shuffle=shuffle,
+        sampler=sampler,
         num_workers=num_workers,
         pin_memory=True,
     )
@@ -302,7 +337,7 @@ def validate(
     device: torch.device,
     num_classes: int,
     task: str = "classification",
-) -> Tuple[float, float, float, float]:
+) -> Tuple[float, float, float, float, np.ndarray]:
     """
     Validate the model.
 
@@ -314,7 +349,7 @@ def validate(
         num_classes: Number of classes for F2-Score calculation
 
     Returns:
-        Tuple of (average_loss, accuracy, f2_score_macro, quadratic_weighted_kappa)
+        Tuple of (average_loss, accuracy, f2_score_macro, quadratic_weighted_kappa, confusion_matrix)
     """
     model.eval()
 
@@ -362,7 +397,10 @@ def validate(
     # QWK penalizes predictions that are further from the true label more heavily
     epoch_qwk = cohen_kappa_score(all_labels, all_preds, weights="quadratic")
 
-    return epoch_loss, epoch_acc, epoch_f2, epoch_qwk
+    # Calculate Confusion Matrix
+    cm = confusion_matrix(all_labels, all_preds, labels=labels_list)
+
+    return epoch_loss, epoch_acc, epoch_f2, epoch_qwk, cm
 
 
 def train(
@@ -413,6 +451,7 @@ def train(
             seed=args.seed,
             data_dir=data_dir,
             file_ext=file_ext,
+            use_sampler=args.sampler,
         )
     )
 
@@ -560,7 +599,7 @@ def train(
         )
 
         # Validate (returns F2-Score and QWK)
-        val_loss, val_acc, val_f2, val_qwk = validate(
+        val_loss, val_acc, val_f2, val_qwk, _ = validate(
             model, val_loader, criterion, device, num_classes, task=args.task
         )
 
@@ -659,7 +698,7 @@ def train(
         print("[!] Warning: Best model not found. Using final model weights.")
 
     # Run validation on Test Set
-    test_loss, test_acc, test_f2, test_qwk = validate(
+    test_loss, test_acc, test_f2, test_qwk, test_cm = validate(
         model, test_loader, criterion, device, num_classes, task=args.task
     )
 
@@ -670,6 +709,32 @@ def train(
         print(f"   Test QWK:  {test_qwk:.4f} (Quadratic Weighted Kappa)")
     else:
         print(f"   Test F2:   {test_f2:.4f} (Macro F2-Score)")
+
+    # Print Confusion Matrix with class labels
+    print("\n[Confusion Matrix]")
+    if args.task == "grading":
+        class_names = [GRADE_MAP_INV[i] for i in range(num_classes)]
+    else:
+        class_names = [CLASS_MAP_INV[i] for i in range(num_classes)]
+
+    # Calculate column width based on class names and values
+    col_width = max(8, max(len(name) for name in class_names) + 2)
+
+    # Print header row
+    header_indent = " " * (col_width + 6)  # "True " + class name
+    header = header_indent + "".join(
+        f"Pred {name:>{col_width - 5}}" for name in class_names
+    )
+    print(header)
+
+    # Print data rows
+    for i, true_name in enumerate(class_names):
+        row_label = f"True {true_name:>{col_width - 5}}"
+        row_values = "".join(
+            f"{test_cm[i][j]:>{col_width}}" for j in range(num_classes)
+        )
+        print(f"{row_label}{row_values}")
+
     print(f"{'=' * 60}\n")
 
     return {
