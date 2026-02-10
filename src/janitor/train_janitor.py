@@ -28,6 +28,7 @@ import argparse
 import random
 import sys
 from datetime import datetime
+from pathlib import Path
 from typing import List, Tuple
 
 import numpy as np
@@ -40,7 +41,10 @@ from torch.utils.data import DataLoader
 from torchvision import datasets, models, transforms
 from tqdm import tqdm
 
-from config import EXPERIMENTS_DIR, PROJECT_ROOT, SEED
+# Ensure src/ is on sys.path when running directly (e.g., python src/janitor/train_janitor.py)
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from core.config import EXPERIMENTS_DIR, PROJECT_ROOT, SEED
 
 
 # ============================================================================

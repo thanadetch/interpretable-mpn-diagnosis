@@ -14,7 +14,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from config import (
+from core.config import (
     DATA_MODE_CONFIG,
     DEFAULT_DATA_MODE,
     SEED,

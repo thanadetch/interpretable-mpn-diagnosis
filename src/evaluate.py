@@ -34,7 +34,7 @@ from tqdm import tqdm
 import matplotlib.pyplot as plt
 import seaborn as sns
 
-from config import (
+from core.config import (
     BATCH_SIZE,
     CLASS_MAP_INV,
     DATA_MODE_CONFIG,
@@ -44,9 +44,9 @@ from config import (
     RESULTS_DIR,
     SEED,
 )
-from dataset import MPNDataset
-from model import get_model
-from utils import get_num_classes, get_patient_split, set_seed
+from data.dataset import MPNDataset
+from models.model import get_model
+from core.utils import get_num_classes, get_patient_split, set_seed
 
 
 # Ensure reports directory exists

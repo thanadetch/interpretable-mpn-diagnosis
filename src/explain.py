@@ -17,7 +17,7 @@ import torch
 from PIL import Image
 from torchvision import transforms
 
-from config import (
+from core.config import (
     DATA_MODE_CONFIG,
     DEFAULT_DATA_MODE,
     IMAGE_SIZE,
@@ -26,9 +26,9 @@ from config import (
     CLASS_MAP_INV,
     GRADE_MAP_INV,
 )
-from dataset import MPNDataset
-from model import get_model, get_target_layer
-from utils import get_num_classes, get_patient_split, set_seed
+from data.dataset import MPNDataset
+from models.model import get_model, get_target_layer
+from core.utils import get_num_classes, get_patient_split, set_seed
 
 # Try to import pytorch_grad_cam, provide helpful message if not available
 try:

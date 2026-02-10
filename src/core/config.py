@@ -8,7 +8,7 @@ from typing import Dict
 # ============================================================================
 # Directory Paths
 # ============================================================================
-PROJECT_ROOT: Path = Path(__file__).parent.parent.resolve()
+PROJECT_ROOT: Path = Path(__file__).parent.parent.parent.resolve()
 
 # Data directories
 RAW_DATA_DIR: Path = PROJECT_ROOT / "data" / "raw"

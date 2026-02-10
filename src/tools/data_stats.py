@@ -5,15 +5,16 @@ Dataset Statistics Script for MPN Classification and Fibrosis Grading.
 Analyzes raw data and processed patches, providing summary statistics
 for both subtype (H&E) and grading (Reticulin) tasks.
 """
+
 import re
 import sys
 from collections import defaultdict
 from pathlib import Path
 
-# Add project root to path for imports
-sys.path.insert(0, str(Path(__file__).parent.parent))
+# Ensure src/ is on sys.path when running directly (e.g., python src/tools/data_stats.py)
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src.config import (
+from core.config import (
     RAW_DATA_DIR,
     PROCESSED_SUBTYPE_DIR,
     PROCESSED_SUBTYPE_CLEAN_DIR,
@@ -28,9 +29,9 @@ from src.config import (
 def count_raw_he_images(raw_dir: Path) -> dict:
     """
     Count patients and H&E images grouped by subtype (ET, PV, PMF).
-    
+
     H&E images are identified as files that do NOT start with 'reti'.
-    
+
     Returns:
         dict: {subtype: {'patients': int, 'images': int}}
     """
@@ -49,7 +50,8 @@ def count_raw_he_images(raw_dir: Path) -> dict:
             for ext in IMAGE_EXTENSIONS:
                 # Count only H&E images (NOT starting with 'reti')
                 he_images = [
-                    f for f in patient_dir.glob(f"*{ext}")
+                    f
+                    for f in patient_dir.glob(f"*{ext}")
                     if not f.name.lower().startswith("reti")
                 ]
                 image_count += len(he_images)
@@ -61,10 +63,10 @@ def count_raw_he_images(raw_dir: Path) -> dict:
 def count_raw_reticulin_images(raw_dir: Path) -> dict:
     """
     Count patients and Reticulin images grouped by grade (G0-G3).
-    
+
     Reticulin images are identified as files starting with 'reti'.
     Grade is extracted from the patient folder name (e.g., 'ET1 G1').
-    
+
     Returns:
         dict: {grade: {'patients': set, 'images': int}}
     """
@@ -92,7 +94,8 @@ def count_raw_reticulin_images(raw_dir: Path) -> dict:
             reti_count = 0
             for ext in IMAGE_EXTENSIONS:
                 reti_images = [
-                    f for f in patient_dir.glob(f"*{ext}")
+                    f
+                    for f in patient_dir.glob(f"*{ext}")
                     if f.name.lower().startswith("reti")
                 ]
                 reti_count += len(reti_images)
@@ -102,16 +105,18 @@ def count_raw_reticulin_images(raw_dir: Path) -> dict:
                 stats[grade]["images"] += reti_count
 
     # Convert sets to counts
-    return {grade: {"patients": len(data["patients"]), "images": data["images"]}
-            for grade, data in stats.items()}
+    return {
+        grade: {"patients": len(data["patients"]), "images": data["images"]}
+        for grade, data in stats.items()
+    }
 
 
 def count_patches(processed_dir: Path) -> dict:
     """
     Count patches in a processed directory.
-    
+
     Directory structure: processed_dir/CLASS/PATIENT/*.png
-    
+
     Returns:
         dict: {class_name: patch_count}
     """
@@ -138,9 +143,9 @@ def count_patches(processed_dir: Path) -> dict:
 def count_grading_patches(processed_dir: Path) -> dict:
     """
     Count patches for grading task, grouped by grade.
-    
+
     Grade is extracted from patient folder name.
-    
+
     Returns:
         dict: {grade: patch_count}
     """
@@ -172,8 +177,10 @@ def count_grading_patches(processed_dir: Path) -> dict:
 def print_table(title: str, headers: list, rows: list, col_widths: list = None):
     """Print a formatted table."""
     if col_widths is None:
-        col_widths = [max(len(str(row[i])) for row in [headers] + rows) + 2
-                      for i in range(len(headers))]
+        col_widths = [
+            max(len(str(row[i])) for row in [headers] + rows) + 2
+            for i in range(len(headers))
+        ]
 
     # Title
     total_width = sum(col_widths) + len(col_widths) - 1
@@ -219,13 +226,15 @@ def main():
     headers = ["Subtype", "Patients", "Raw Images", "Patches (Orig)", "Patches (Clean)"]
     rows = []
     for subtype in CLASS_MAP.keys():
-        rows.append([
-            subtype,
-            he_stats.get(subtype, {}).get("patients", 0),
-            he_stats.get(subtype, {}).get("images", 0),
-            subtype_patches.get(subtype, 0),
-            subtype_patches_clean.get(subtype, 0),
-        ])
+        rows.append(
+            [
+                subtype,
+                he_stats.get(subtype, {}).get("patients", 0),
+                he_stats.get(subtype, {}).get("images", 0),
+                subtype_patches.get(subtype, 0),
+                subtype_patches_clean.get(subtype, 0),
+            ]
+        )
 
     print_table("H&E Subtype Classification (ET, PV, PMF)", headers, rows)
 
@@ -239,13 +248,15 @@ def main():
     headers = ["Grade", "Patients", "Raw Images", "Patches (Orig)", "Patches (Clean)"]
     rows = []
     for grade in GRADE_MAP.keys():
-        rows.append([
-            grade,
-            reti_stats.get(grade, {}).get("patients", 0),
-            reti_stats.get(grade, {}).get("images", 0),
-            grading_patches.get(grade, 0),
-            grading_patches_clean.get(grade, 0),
-        ])
+        rows.append(
+            [
+                grade,
+                reti_stats.get(grade, {}).get("patients", 0),
+                reti_stats.get(grade, {}).get("images", 0),
+                grading_patches.get(grade, 0),
+                grading_patches_clean.get(grade, 0),
+            ]
+        )
 
     print_table("Reticulin Fibrosis Grading (G0-G3)", headers, rows)
 
@@ -261,13 +272,19 @@ def main():
     total_reti_patients = sum(s.get("patients", 0) for s in reti_stats.values())
     total_reti_images = sum(s.get("images", 0) for s in reti_stats.values())
 
-    print(f"  H&E (Subtype):      {total_he_patients:>4} patients, {total_he_images:>5} images")
-    print(f"  Reticulin (Grading): {total_reti_patients:>4} patients, {total_reti_images:>5} images")
+    print(
+        f"  H&E (Subtype):      {total_he_patients:>4} patients, {total_he_images:>5} images"
+    )
+    print(
+        f"  Reticulin (Grading): {total_reti_patients:>4} patients, {total_reti_images:>5} images"
+    )
     print()
     print(
-        f"  Subtype Patches:     {sum(subtype_patches.values()):>6} original, {sum(subtype_patches_clean.values()):>6} clean")
+        f"  Subtype Patches:     {sum(subtype_patches.values()):>6} original, {sum(subtype_patches_clean.values()):>6} clean"
+    )
     print(
-        f"  Grading Patches:     {sum(grading_patches.values()):>6} original, {sum(grading_patches_clean.values()):>6} clean")
+        f"  Grading Patches:     {sum(grading_patches.values()):>6} original, {sum(grading_patches_clean.values()):>6} clean"
+    )
     print("=" * 70 + "\n")
 
 

@@ -11,7 +11,7 @@ from PIL import Image
 from torch.utils.data import Dataset
 from torchvision import transforms
 
-from config import IMAGE_SIZE_GRADING, IMAGE_SIZE_SUBTYPE
+from core.config import IMAGE_SIZE_GRADING, IMAGE_SIZE_SUBTYPE
 
 
 class MPNDataset(Dataset):

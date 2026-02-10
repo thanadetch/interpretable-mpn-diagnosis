@@ -9,14 +9,19 @@ Usage:
     python src/preprocess.py
     python src/preprocess.py --patch_size 512 --step_size 256
 """
+
 import argparse
+import sys
 from pathlib import Path
 from typing import List, Tuple
 
 from PIL import Image
 from tqdm import tqdm
 
-from config import RAW_DATA_DIR, PROCESSED_DATA_DIR, IMAGE_EXTENSIONS
+# Ensure src/ is on sys.path when running directly (e.g., python src/data/preprocess.py)
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from core.config import RAW_DATA_DIR, PROCESSED_DATA_DIR, IMAGE_EXTENSIONS
 
 
 def parse_args() -> argparse.Namespace:
@@ -38,7 +43,6 @@ def parse_args() -> argparse.Namespace:
         default=256,
         help="Step size for sliding window (default: 256 for 50%% overlap)",
     )
-
 
     parser.add_argument(
         "--input_dir",
@@ -101,7 +105,7 @@ def calculate_padded_size(
     if original_size <= patch_size:
         num_steps = 0
     else:
-        num_steps = -(-((original_size - patch_size)) // step_size)  # Ceiling division
+        num_steps = -(-(original_size - patch_size) // step_size)  # Ceiling division
 
     # The padded size should allow exactly num_steps + 1 patches
     # Last patch starts at: num_steps * step_size
@@ -145,7 +149,6 @@ def pad_image_for_patching(
 
     # Paste original image at top-left corner
     padded.paste(image, (0, 0))
-
 
     return padded
 
@@ -288,16 +291,18 @@ def process_dataset(
         print(f"No class directories found in {input_dir}")
         return stats
 
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"Sliding Window Patching")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
     print(f"Input directory:  {input_dir}")
     print(f"Output directory: {output_dir}")
     print(f"Patch size:       {patch_size}x{patch_size}")
-    print(f"Step size:        {step_size} ({100 * (patch_size - step_size) / patch_size:.0f}% overlap)")
+    print(
+        f"Step size:        {step_size} ({100 * (patch_size - step_size) / patch_size:.0f}% overlap)"
+    )
     print(f"Padding:          Black pixels (0,0,0) for complete coverage")
     print(f"Stain filter:     {stain}")
-    print(f"{'='*60}\n")
+    print(f"{'=' * 60}\n")
 
     # Process each class
     for class_dir in sorted(class_dirs):
@@ -329,7 +334,8 @@ def process_dataset(
 
             # Find all images in patient directory
             all_files = [
-                f for f in patient_dir.iterdir()
+                f
+                for f in patient_dir.iterdir()
                 if f.is_file() and f.suffix.lower() in IMAGE_EXTENSIONS
             ]
 
@@ -337,7 +343,7 @@ def process_dataset(
             image_files = []
             for f in all_files:
                 is_reti = "reti" in f.name.lower()
-                
+
                 if stain == "reti" and is_reti:
                     image_files.append(f)
                 elif stain == "he" and not is_reti:
@@ -373,28 +379,28 @@ def process_dataset(
 
 def print_stats(stats: dict) -> None:
     """Print processing statistics."""
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"Processing Complete!")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
     print(f"Total images processed: {stats['total_images']}")
     print(f"Total patches created:  {stats['total_patches']}")
     print(f"Skipped images:         {stats['skipped_images']}")
     print(f"\nPer-class statistics:")
-    print(f"{'-'*60}")
+    print(f"{'-' * 60}")
 
     for class_name, class_stats in stats["classes"].items():
         print(f"  {class_name}:")
         print(f"    Patients: {class_stats['patients']}")
         print(f"    Images:   {class_stats['images']}")
         print(f"    Patches:  {class_stats['patches']}")
-        if class_stats['images'] > 0:
-            avg_patches = class_stats['patches'] / class_stats['images']
+        if class_stats["images"] > 0:
+            avg_patches = class_stats["patches"] / class_stats["images"]
             print(f"    Avg patches/image: {avg_patches:.1f}")
 
-    print(f"{'='*60}\n")
+    print(f"{'=' * 60}\n")
 
-    if stats['total_images'] > 0:
-        expansion_factor = stats['total_patches'] / stats['total_images']
+    if stats["total_images"] > 0:
+        expansion_factor = stats["total_patches"] / stats["total_images"]
         print(f"Dataset expansion factor: {expansion_factor:.1f}x")
         print(f"  Original images: {stats['total_images']}")
         print(f"  Total patches:   {stats['total_patches']}")
@@ -431,4 +437,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

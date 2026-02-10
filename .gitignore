@@ -7,7 +7,7 @@
 .venv
 out
 gen
-data
+/data
 results
 experiments
 .DS_Store

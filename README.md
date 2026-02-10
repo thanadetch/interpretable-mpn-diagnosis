@@ -22,7 +22,7 @@
 `python src/evaluate.py --checkpoint experiments/classification_resnet18_patch_20260112_151612/best_model.pth --data_mode patch`
 `python src/evaluate.py --checkpoint experiments/classification_densenet121_subtype_patch_clean_20260121_122850/best_model.pth --data_mode subtype_patch_clean  --aggregation mean --level image`
 `python src/evaluate.py --checkpoint experiments/classification_densenet121_subtype_patch_clean_20260121_122850/best_model.pth --data_mode subtype_patch_clean  --aggregation mean --level patient`
-`python src/evaluate.py --checkpoint experiments/classification_resnet18_subtype_patch_clean_20260207_132555_full/best_model.pth --data_mode subtype_patch_clean  --aggregation mean --level image`
+`python src/evaluate.py --checkpoint experiments/classification_resnet18_subtype_patch_clean_20260207_143722_ce_weighted_full/best_model.pth --data_mode subtype_patch_clean  --aggregation mean --level patient`
 
 `python src/explain.py --checkpoint experiments/classification_resnet18_patch_20260101_220104/best_model.pth --data_mode patch --num_samples 10`
 `python src/explain.py --checkpoint experiments/classification_densenet121_subtype_patch_clean_20260121_122850/best_model.pth --data_mode subtype_patch_clean --num_samples 50`
@@ -33,7 +33,7 @@
 
 `python src/explain.py --checkpoint experiments/classification_resnet18_resize_20260101_210945/best_model.pth --data_mode resize --num_samples 10`
 `python src/explain.py --checkpoint experiments/classification_resnet18_patch_20260112_151612/best_model.pth --data_mode patch --num_samples 30`
-`python src/explain.py --checkpoint experiments/classification_densenet121_subtype_patch_clean_20260121_030818/best_model.pth --data_mode subtype_patch_clean --num_samples 50`
+`python src/explain.py --checkpoint experiments/classification_resnet18_subtype_patch_clean_20260207_143722_ce_weighted_full/best_model.pth --data_mode subtype_patch_clean --num_samples 50`
 
 ### *Grading Task*
 ### Patch Data Mode
@@ -55,27 +55,27 @@
 
 
 ### Data Preprocessing Command for Patch Mode
-`python src/preprocess.py --patch_size 512 --step_size 256`
-`python src/preprocess.py --stain reti --patch_size 224 --step_size 112 --output_dir data/processed_grading`
-`python src/preprocess.py --stain he --patch_size 512 --step_size 256 --output_dir data/processed_subtype`
+`python src/data/preprocess.py --patch_size 512 --step_size 256`
+`python src/data/preprocess.py --stain reti --patch_size 224 --step_size 112 --output_dir data/processed_grading`
+`python src/data/preprocess.py --stain he --patch_size 512 --step_size 256 --output_dir data/processed_subtype`
 
-`python src/run_janitor.py --task grading --model_path experiments/janitor_grading_20260202_143052/janitor_model_grading.pth`
+`python src/janitor/run_janitor.py --task grading --model_path experiments/janitor_grading_20260202_143052/janitor_model_grading.pth`
 
-`python src/run_janitor.py \
+`python src/janitor/run_janitor.py \
     --task subtype \
     --input_dir data/processed_subtype_clean \
     --threshold 0.80`
 
-`python src/run_janitor.py \
+`python src/janitor/run_janitor.py \
     --task grading \
     --input_dir data/processed_grading_clean \
     --threshold 0.80`
 
-`python tools/data_stats.py`
+`python src/tools/data_stats.py`
 
 
 # Classification task 
-`python tools/find_best_seed.py --task classification --data_mode subtype_patch_clean` 
+`python src/tools/find_best_seed.py --task classification --data_mode subtype_patch_clean` 
 
 # Grading task
-`python tools/find_best_seed.py --task grading --data_mode grading_patch_clean`
+`python src/tools/find_best_seed.py --task grading --data_mode grading_patch_clean`

@@ -21,7 +21,7 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.utils.data import DataLoader, WeightedRandomSampler
 from tqdm import tqdm
 
-from config import (
+from core.config import (
     BATCH_SIZE,
     CLASS_MAP_INV,
     DATA_MODE_CONFIG,
@@ -34,9 +34,9 @@ from config import (
     SEED,
     SUPPORTED_MODELS,
 )
-from dataset import MPNDataset
-from model import get_model, print_model_summary
-from utils import (
+from data.dataset import MPNDataset
+from models.model import get_model, print_model_summary
+from core.utils import (
     EMDLoss,
     FocalLoss,
     get_class_weights,
