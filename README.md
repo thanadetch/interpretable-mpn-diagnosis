@@ -79,3 +79,6 @@
 
 # Grading task
 `python src/tools/find_best_seed.py --task grading --data_mode grading_patch_clean`
+
+
+python src/train_slide_encoder.py --features_dir data/features_titan --epochs 50 --lr 1e-4 --seed 42
