@@ -1,22 +1,22 @@
 """
-TITAN/CONCHv1.5 Feature Extraction — Image-Level Bag Pipeline.
+Virchow2 Feature Extraction — Image-Level Bag Pipeline.
 
-Extracts frozen CONCHv1.5 patch embeddings from raw image patches,
+Extracts frozen Virchow2 [CLS] embeddings from pre-patched image tiles,
 grouped by source image ID. Each original image produces one .pt file
-containing a stacked tensor of shape [N_patches, 768].
+containing a stacked tensor of shape [N_patches, 1280].
 
 Input:  data/processed_subtype/{Class}/{PatientID}/{ImgID}_r{Row}c{Col}.png
-Output: data/features_titan/{Class}/{PatientID}_{ImgID}.pt
+Output: data/features_virchow2/{Class}/{PatientID}/{ImgID}.pt
 
 Usage:
-    python -m src.tools.extract_features \
+    python -m src.tools.extract_virchow2 \
         --data_dir data/processed_subtype \
-        --output_dir data/features_titan \
+        --output_dir data/features_virchow2 \
         --batch_size 64 \
         --device cuda
 
     # Dry-run (validates grouping without extracting):
-    python -m src.tools.extract_features --dry_run
+    python -m src.tools.extract_virchow2 --dry_run
 """
 
 import argparse
@@ -25,19 +25,22 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Dict, List, Tuple
 
+import timm
 import torch
 from PIL import Image
+from timm.data import resolve_data_config
+from timm.data.transforms_factory import create_transform
+from timm.layers import SwiGLUPacked
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
-from transformers import AutoModel
 from huggingface_hub import login
 
 # =============================================================================
 # Constants
 # =============================================================================
 DEFAULT_DATA_DIR = "data/processed_subtype"
-DEFAULT_OUTPUT_DIR = "data/features_titan"
-FEATURE_DIM = 768
+DEFAULT_OUTPUT_DIR = "data/features_virchow2"
+FEATURE_DIM = 1280
 CLASSES = ["ET", "PV", "PMF"]
 
 
@@ -89,15 +92,6 @@ def group_patches_by_image(
     return dict(groups)
 
 
-def sanitize_patient_id(folder_name: str) -> str:
-    """
-    Sanitize patient folder name for use in output filenames.
-
-    Example: "ET1 G1" → "ET1_G1"
-    """
-    return folder_name.replace(" ", "_")
-
-
 # =============================================================================
 # Patch Dataset (for batched feature extraction)
 # =============================================================================
@@ -107,9 +101,12 @@ class PatchDataset(Dataset):
     """
     Simple dataset for loading patches from a single image group.
 
+    Patches are already 224×224; no resizing is performed.
+    The timm transform handles normalization and tensor conversion.
+
     Args:
         patch_paths: List of paths to patch images.
-        transform:   Preprocessing transform from CONCHv1.5.
+        transform:   timm eval transform.
     """
 
     def __init__(self, patch_paths: List[Path], transform) -> None:
@@ -121,7 +118,7 @@ class PatchDataset(Dataset):
 
     def __getitem__(self, idx: int) -> torch.Tensor:
         img = Image.open(self.patch_paths[idx]).convert("RGB")
-        return self.transform(img)
+        return self.transform(img)  # [3, 224, 224]
 
 
 # =============================================================================
@@ -138,17 +135,17 @@ def extract_features_for_image(
     device: torch.device,
 ) -> torch.Tensor:
     """
-    Extract CONCHv1.5 features for all patches in one image group.
+    Extract Virchow2 [CLS] features for all patches in one image group.
 
     Args:
         patch_paths: Ordered list of patch file paths.
-        model:       Frozen CONCHv1.5 model.
-        transform:   CONCHv1.5 eval transform.
+        model:       Frozen Virchow2 model.
+        transform:   timm eval transform.
         batch_size:  Batch size for inference.
         device:      Device to run inference on.
 
     Returns:
-        Stacked feature tensor of shape [N_patches, 768].
+        Stacked feature tensor of shape [N_patches, 1280].
     """
     dataset = PatchDataset(patch_paths, transform)
     loader = DataLoader(
@@ -164,11 +161,14 @@ def extract_features_for_image(
     for batch in loader:
         batch = batch.to(device)
         with torch.autocast(device.type, torch.float16, enabled=use_amp):
-            features = model(batch)
-        # Move to float32 on CPU to avoid MPS half-precision save issues
-        all_features.append(features.float().cpu())
+            output = model(batch)  # [B, 261, 1280]
 
-    return torch.cat(all_features, dim=0)  # [N, 768]
+        # Extract [CLS] token at index 0 → shape [B, 1280]
+        cls_features = output[:, 0, :]
+        # Move to float32 on CPU to avoid half-precision save issues
+        all_features.append(cls_features.float().cpu())
+
+    return torch.cat(all_features, dim=0)  # [N, 1280]
 
 
 # =============================================================================
@@ -185,10 +185,8 @@ def run_extraction(args: argparse.Namespace) -> None:
     # ------------------------------------------------------------------
     # Discover all patients and their image groups
     # ------------------------------------------------------------------
-    extraction_plan: List[
-        Tuple[str, str, str, Dict[str, List[Tuple[Path, int, int]]]]
-    ] = []
-    # Each entry: (class_name, patient_folder_name, sanitized_pid, image_groups)
+    extraction_plan: List[Tuple[str, str, Dict[str, List[Tuple[Path, int, int]]]]] = []
+    # Each entry: (class_name, patient_folder_name, image_groups)
 
     total_images = 0
     total_patches = 0
@@ -210,10 +208,7 @@ def run_extraction(args: argparse.Namespace) -> None:
                 print(f"  ⚠ No patches found in {patient_dir.name}")
                 continue
 
-            sanitized_pid = sanitize_patient_id(patient_dir.name)
-            extraction_plan.append(
-                (class_name, patient_dir.name, sanitized_pid, image_groups)
-            )
+            extraction_plan.append((class_name, patient_dir.name, image_groups))
             total_images += len(image_groups)
             total_patches += sum(len(v) for v in image_groups.values())
 
@@ -221,13 +216,14 @@ def run_extraction(args: argparse.Namespace) -> None:
     # Summary
     # ------------------------------------------------------------------
     print("=" * 60)
-    print("Feature Extraction Plan")
+    print("Virchow2 Feature Extraction Plan")
     print("=" * 60)
     print(f"  {'Data dir':<14}: {data_dir}")
     print(f"  {'Output dir':<14}: {output_dir}")
     print(f"  {'Patients':<14}: {len(extraction_plan)}")
     print(f"  {'Total images':<14}: {total_images}")
     print(f"  {'Total patches':<14}: {total_patches}")
+    print(f"  {'Feature dim':<14}: {FEATURE_DIM}")
     print(f"  {'Device':<14}: {device}")
     print("=" * 60)
 
@@ -236,13 +232,12 @@ def run_extraction(args: argparse.Namespace) -> None:
     # ------------------------------------------------------------------
     if args.dry_run:
         print("\n🔍 DRY RUN — Printing extraction plan:\n")
-        for class_name, patient_name, sanitized_pid, groups in extraction_plan:
+        for class_name, patient_name, groups in extraction_plan:
             print(f"  📁 {class_name}/{patient_name}")
             sorted_img_ids = sorted(groups.keys(), key=lambda x: int(x))
             for img_id in sorted_img_ids:
                 patches = groups[img_id]
-                out_name = f"{sanitized_pid}_{img_id}.pt"
-                out_path = output_dir / class_name / out_name
+                out_path = output_dir / class_name / patient_name / f"{img_id}.pt"
                 print(
                     f"      Image {img_id:>3}: {len(patches):4d} patches → {out_path}"
                 )
@@ -250,15 +245,22 @@ def run_extraction(args: argparse.Namespace) -> None:
         return
 
     # ------------------------------------------------------------------
-    # Load CONCHv1.5 (via TITAN)
+    # Load Virchow2
     # ------------------------------------------------------------------
-    print("\nLoading TITAN + CONCHv1.5...")
+    print("\nLoading Virchow2...")
     login()
-    titan = AutoModel.from_pretrained("MahmoodLab/TITAN", trust_remote_code=True)
-    conch, eval_transform = titan.return_conch()
-    conch = conch.to(device)
-    conch.eval()
-    print("✅ CONCHv1.5 loaded and frozen.\n")
+    model = timm.create_model(
+        "hf-hub:paige-ai/Virchow2",
+        pretrained=True,
+        mlp_layer=SwiGLUPacked,
+        act_layer=torch.nn.SiLU,
+    )
+    transform = create_transform(
+        **resolve_data_config(model.pretrained_cfg, model=model)
+    )
+    model = model.to(device)
+    model.eval()
+    print(f"✅ Virchow2 loaded (feature_dim={FEATURE_DIM}).\n")
 
     # ------------------------------------------------------------------
     # Extract features
@@ -266,11 +268,12 @@ def run_extraction(args: argparse.Namespace) -> None:
     processed = 0
     skipped = 0
 
-    for class_name, patient_name, sanitized_pid, groups in tqdm(
+    for class_name, patient_name, groups in tqdm(
         extraction_plan, desc="Patients", unit="patient"
     ):
-        class_output_dir = output_dir / class_name
-        class_output_dir.mkdir(parents=True, exist_ok=True)
+        # Mirror input structure: output_dir/{Class}/{PatientID}/
+        patient_output_dir = output_dir / class_name / patient_name
+        patient_output_dir.mkdir(parents=True, exist_ok=True)
 
         sorted_img_ids = sorted(groups.keys(), key=lambda x: int(x))
 
@@ -280,8 +283,7 @@ def run_extraction(args: argparse.Namespace) -> None:
             leave=False,
             unit="img",
         ):
-            out_name = f"{sanitized_pid}_{img_id}.pt"
-            out_path = class_output_dir / out_name
+            out_path = patient_output_dir / f"{img_id}.pt"
 
             # Skip if already extracted
             if out_path.exists() and not args.overwrite:
@@ -293,8 +295,8 @@ def run_extraction(args: argparse.Namespace) -> None:
 
             features = extract_features_for_image(
                 patch_paths=patch_paths,
-                model=conch,
-                transform=eval_transform,
+                model=model,
+                transform=transform,
                 batch_size=args.batch_size,
                 device=device,
             )
@@ -306,7 +308,7 @@ def run_extraction(args: argparse.Namespace) -> None:
     # Done
     # ------------------------------------------------------------------
     print(f"\n{'=' * 60}")
-    print("Feature Extraction Complete")
+    print("Virchow2 Feature Extraction Complete")
     print(f"{'=' * 60}")
     print(f"  Extracted : {processed} image bags")
     print(f"  Skipped   : {skipped} (already exist)")
@@ -321,7 +323,7 @@ def run_extraction(args: argparse.Namespace) -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Extract CONCHv1.5 features grouped by source image."
+        description="Extract Virchow2 [CLS] features grouped by source image."
     )
     parser.add_argument(
         "--data_dir",
