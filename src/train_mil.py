@@ -34,6 +34,7 @@ from sklearn.metrics import (
     classification_report,
     confusion_matrix,
     f1_score,
+    fbeta_score,
     recall_score,
 )
 from tqdm import tqdm
@@ -247,7 +248,7 @@ def train_one_epoch(
         model_type: str = "simple",
         tier1_weight: float = 0.5,
         instance_weight: float = 0.2,
-) -> Tuple[float, float, float, float, List[float], dict]:
+) -> Tuple[float, float, float, float, float, List[float], dict]:
     """Train for one epoch. Handles both 'simple' and 'dtfd' model types."""
     model.train()
     running_loss = 0.0
@@ -314,6 +315,7 @@ def train_one_epoch(
     avg_loss = running_loss / total
     avg_acc = 100.0 * correct / total
     train_f1 = f1_score(all_labels, all_preds, average="macro", zero_division=0)
+    train_f2 = fbeta_score(all_labels, all_preds, beta=2, average="macro", zero_division=0)
     train_bacc = 100.0 * balanced_accuracy_score(all_labels, all_preds)
 
     # Per-class recall
@@ -324,7 +326,7 @@ def train_one_epoch(
     recall_list = [100.0 * r for r in per_class_recall]
 
     avg_components = {k: v / total for k, v in loss_sums.items()}
-    return avg_loss, avg_acc, train_f1, train_bacc, recall_list, avg_components
+    return avg_loss, avg_acc, train_f1, train_f2, train_bacc, recall_list, avg_components
 
 
 # ── validation & evaluation ──────────────────────────────────────────────
@@ -335,7 +337,7 @@ def validate_and_evaluate(
         criterion: nn.Module,
         device: torch.device,
         desc: str = "  Val  ",
-) -> Tuple[float, float, float, float, List[float], str, str]:
+) -> Tuple[float, float, float, float, float, List[float], str, str]:
     """
     Validate/Test a MIL model and return metric strings.
 
@@ -343,6 +345,7 @@ def validate_and_evaluate(
         avg_loss: Average loss over all samples.
         accuracy: Accuracy as a percentage.
         f1_macro: Macro-averaged F1 score.
+        f2_macro: Macro-averaged F2 score.
         balanced_acc: Balanced accuracy as a percentage.
         recall_list: Per-class recall as percentages.
         cm_str: Formatted confusion matrix string.
@@ -380,6 +383,7 @@ def validate_and_evaluate(
 
     # Compute imbalance-aware metrics
     f1_macro = f1_score(all_labels, all_preds, average="macro", zero_division=0)
+    f2_macro = fbeta_score(all_labels, all_preds, beta=2, average="macro", zero_division=0)
     balanced_acc = 100.0 * balanced_accuracy_score(all_labels, all_preds)
 
     # Build confusion matrix string
@@ -413,7 +417,7 @@ def validate_and_evaluate(
     )
     recall_list = [100.0 * r for r in per_class_recall]
 
-    return avg_loss, accuracy, f1_macro, balanced_acc, recall_list, cm_str, report_str
+    return avg_loss, accuracy, f1_macro, f2_macro, balanced_acc, recall_list, cm_str, report_str
 
 
 # ── argument parsing ─────────────────────────────────────────────────────
@@ -574,7 +578,7 @@ def main() -> None:
     scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=1e-6)
 
     # ── Training loop ─────────────────────────────────────────────────
-    best_val_acc = 0.0
+    best_val_f2 = 0.0
     best_epoch = 0
 
     log(f"\n{'=' * 60}", log_file)
@@ -582,7 +586,7 @@ def main() -> None:
     log(f"{'=' * 60}", log_file)
 
     # Table header
-    hdr = "Ep   | Mode  | Loss  | Acc   | F1    | B.Acc | Recall ( ET / PV / PMF )"
+    hdr = "Ep   | Mode  | Loss  | Acc   | F1    | F2    | B.Acc | Recall ( ET / PV / PMF )"
     sep = "-" * len(hdr)
 
     def fmt_recall(recall_list: List[float]) -> str:
@@ -601,7 +605,7 @@ def main() -> None:
             print_header()
 
         # Train
-        train_loss, train_acc, train_f1, train_bacc, train_recall, loss_components = train_one_epoch(
+        train_loss, train_acc, train_f1, train_f2, train_bacc, train_recall, loss_components = train_one_epoch(
             model, train_loader, criterion, optimizer, device,
             model_type=args.model_type,
             tier1_weight=args.tier1_weight,
@@ -609,34 +613,35 @@ def main() -> None:
         )
 
         # Validate
-        val_loss, val_acc, val_f1, val_bacc, val_recall, val_cm_str, val_report_str = validate_and_evaluate(
+        val_loss, val_acc, val_f1, val_f2, val_bacc, val_recall, val_cm_str, val_report_str = validate_and_evaluate(
             model, val_loader, criterion, device,
         )
 
         # Per-epoch logging (2-line table)
         ep_str = f"{epoch}/{args.epochs}"
         log(
-            f"{ep_str:<5}| Train | {train_loss:.3f} | {train_acc:5.1f} "
-            f"| {train_f1:.3f} | {train_bacc:5.1f} | {fmt_recall(train_recall)}",
+            f"{ep_str:<5}| Train | {train_loss:<5.3f} | {train_acc:<5.1f} "
+            f"| {train_f1:<5.3f} | {train_f2:<5.3f} | {train_bacc:<5.1f} | {fmt_recall(train_recall)}",
             log_file,
         )
         log(
-            f"     | Val   | {val_loss:.3f} | {val_acc:5.1f} "
-            f"| {val_f1:.3f} | {val_bacc:5.1f} | {fmt_recall(val_recall)}",
+            f"     | Val   | {val_loss:<5.3f} | {val_acc:<5.1f} "
+            f"| {val_f1:<5.3f} | {val_f2:<5.3f} | {val_bacc:<5.1f} | {fmt_recall(val_recall)}",
             log_file,
         )
         log(sep, log_file)
 
         scheduler.step()
 
-        # Save best model (only on val_acc improvement)
-        if val_acc > best_val_acc:
-            best_val_acc = val_acc
+        # Save best model (based on val F2-score)
+        if val_f2 > best_val_f2:
+            best_val_f2 = val_f2
             best_epoch = epoch
             checkpoint = {
                 "epoch": epoch,
                 "model_state_dict": model.state_dict(),
                 "optimizer_state_dict": optimizer.state_dict(),
+                "val_f2": val_f2,
                 "val_acc": val_acc,
                 "val_loss": val_loss,
                 "test_idx": test_idx,
@@ -645,7 +650,7 @@ def main() -> None:
                 "args": vars(args),
             }
             torch.save(checkpoint, exp_dir / checkpoint_name)
-            log(f">>> ⭐ New Best Model! Val Acc: {val_acc:.1f}%", log_file)
+            log(f"     >>> ⭐ New Best Model! Val F2: {val_f2:.3f} | Acc: {val_acc:.1f}%", log_file)
             log(f"\n{val_cm_str}", log_file)
             log(f"\n{val_report_str}", log_file)
 
@@ -660,7 +665,7 @@ def main() -> None:
         checkpoint = torch.load(best_ckpt_path, map_location=device, weights_only=True)
         model.load_state_dict(checkpoint["model_state_dict"])
 
-        test_loss, test_acc, test_f1, test_bacc, test_recall, test_cm_str, test_report_str = validate_and_evaluate(
+        test_loss, test_acc, test_f1, test_f2, test_bacc, test_recall, test_cm_str, test_report_str = validate_and_evaluate(
             model, test_loader, criterion, device,
             desc="  Test ",
         )
@@ -669,9 +674,10 @@ def main() -> None:
         log(f"\n{test_report_str}", log_file)
 
         log(f"\nFINAL RESULTS:", log_file)
-        log(f"  Best Validation Acc: {best_val_acc:.2f}% (Epoch {best_epoch})", log_file)
+        log(f"  Best Validation F2:  {best_val_f2:.3f} (Epoch {best_epoch})", log_file)
         log(f"  Test Accuracy:       {test_acc:.2f}%", log_file)
         log(f"  Test F1 (Macro):     {test_f1:.3f}", log_file)
+        log(f"  Test F2 (Macro):     {test_f2:.3f}", log_file)
         log(f"  Test Balanced Acc:   {test_bacc:.2f}%", log_file)
         log(f"  Test Loss:           {test_loss:.4f}", log_file)
     else:
