@@ -25,7 +25,6 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.utils.data import DataLoader, Subset
@@ -41,7 +40,9 @@ from tqdm import tqdm
 
 from core.config import CLASS_MAP, CLASS_MAP_INV, EXPERIMENTS_DIR, SEED
 from data.bag_dataset import MPNBagDatasetFull
+from models.clam import CLAM_SB
 from models.dtfd_mil import DTFDMIL, compute_dtfd_loss
+from models.simple_mil import SimpleGatedMIL
 
 # ── backbone configuration ───────────────────────────────────────────────
 BACKBONE_CONFIG: Dict[str, Dict] = {
@@ -68,84 +69,6 @@ CLASS_NAMES = [CLASS_MAP_INV[i] for i in range(len(CLASS_MAP))]
 warnings.filterwarnings("ignore", message="y_pred contains classes not in y_true")
 
 
-# ── SimpleGatedMIL ───────────────────────────────────────────────────────
-class SimpleGatedMIL(nn.Module):
-    """
-    Lightweight Gated-Attention MIL for small datasets.
-
-    Architecture:
-        Bottleneck: Linear(input_dim, 128) -> ReLU -> Dropout(0.5)
-        Gated Attention: tanh/sigmoid gating -> softmax attention
-        Classifier: Linear(128, num_classes)
-
-    Returns (logits, attention_weights, None) to match DTFD forward signature.
-    """
-
-    def __init__(
-        self,
-        input_dim: int,
-        num_classes: int = 3,
-        hidden_dim: int = 128,
-        dropout: float = 0.5,
-    ) -> None:
-        super().__init__()
-
-        # Bottleneck projection
-        self.bottleneck = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim),
-            nn.ReLU(inplace=True),
-            nn.Dropout(dropout),
-        )
-
-        # Gated attention
-        self.attention_V = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.Tanh(),
-        )
-        self.attention_U = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.Sigmoid(),
-        )
-        self.attention_W = nn.Linear(hidden_dim, 1)
-
-        # Classifier
-        self.classifier = nn.Linear(hidden_dim, num_classes)
-
-    def forward(
-        self,
-        features: torch.Tensor,
-        return_attention: bool = False,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], None]:
-        """
-        Args:
-            features: Instance features [N, D].
-            return_attention: Whether to return attention weights.
-
-        Returns:
-            logits: Bag-level logits [C].
-            attention: Attention weights [N] (if return_attention=True).
-            None: Placeholder for compatibility with DTFD signature.
-        """
-        # Bottleneck
-        h = self.bottleneck(features)  # [N, hidden_dim]
-
-        # Gated attention scores
-        V = self.attention_V(h)  # [N, hidden_dim]
-        U = self.attention_U(h)  # [N, hidden_dim]
-        attn_scores = self.attention_W(V * U).squeeze(-1)  # [N]
-        attention = F.softmax(attn_scores, dim=0)  # [N]
-
-        # Weighted aggregation
-        aggregated = torch.mm(attention.unsqueeze(0), h).squeeze(0)  # [hidden_dim]
-
-        # Classification
-        logits = self.classifier(aggregated)  # [C]
-
-        if return_attention:
-            return logits, attention, None
-        return logits, None, None
-
-
 # ── helpers ───────────────────────────────────────────────────────────────
 def set_seed(seed: int) -> None:
     """Set all random seeds for reproducibility."""
@@ -166,10 +89,10 @@ def log(msg: str, log_file: Optional[Path] = None) -> None:
 
 
 def patient_split(
-        dataset: MPNBagDatasetFull,
-        train_ratio: float = 0.7,
-        val_ratio: float = 0.15,
-        seed: int = 42,
+    dataset: MPNBagDatasetFull,
+    train_ratio: float = 0.7,
+    val_ratio: float = 0.15,
+    seed: int = 42,
 ) -> Tuple[List[int], List[int], List[int]]:
     """
     Stratified split by patient ID and disease label.
@@ -219,8 +142,8 @@ def patient_split(
             n_test = n - n_train - n_val
 
         train_patients = patients[:n_train]
-        val_patients = patients[n_train: n_train + n_val]
-        test_patients = patients[n_train + n_val:]
+        val_patients = patients[n_train : n_train + n_val]
+        test_patients = patients[n_train + n_val :]
 
         train_idx.extend(i for p in train_patients for i in patient_to_indices[p])
         val_idx.extend(i for p in val_patients for i in patient_to_indices[p])
@@ -240,16 +163,18 @@ def collate_bags(batch):
 
 # ── training ─────────────────────────────────────────────────────────────
 def train_one_epoch(
-        model: nn.Module,
-        loader: DataLoader,
-        criterion: nn.Module,
-        optimizer: torch.optim.Optimizer,
-        device: torch.device,
-        model_type: str = "simple",
-        tier1_weight: float = 0.5,
-        instance_weight: float = 0.2,
+    model: nn.Module,
+    loader: DataLoader,
+    criterion: nn.Module,
+    optimizer: torch.optim.Optimizer,
+    device: torch.device,
+    model_type: str = "simple",
+    tier1_weight: float = 0.5,
+    instance_weight: float = 0.2,
+    bag_weight: float = 0.7,
+    inst_weight: float = 0.3,
 ) -> Tuple[float, float, float, float, float, List[float], dict]:
-    """Train for one epoch. Handles both 'simple' and 'dtfd' model types."""
+    """Train for one epoch. Handles 'simple', 'dtfd', and 'clam_sb' model types."""
     model.train()
     running_loss = 0.0
     correct = 0
@@ -269,7 +194,9 @@ def train_one_epoch(
             label = labels[i].item()
 
             if model_type == "dtfd":
-                bag_logits, pseudo_bag_logits, instance_logits_list = model.forward_training(features)
+                bag_logits, pseudo_bag_logits, instance_logits_list = (
+                    model.forward_training(features)
+                )
                 loss, loss_dict = compute_dtfd_loss(
                     bag_logits=bag_logits,
                     pseudo_bag_logits=pseudo_bag_logits,
@@ -281,6 +208,15 @@ def train_one_epoch(
                 )
                 for key, value in loss_dict.items():
                     loss_sums[key] += value
+            elif model_type == "clam_sb":
+                # CLAM-SB: bag loss + instance clustering loss
+                logits, inst_dict = model.forward_training(features, bag_label=label)
+                label_tensor = torch.tensor([label], device=device)
+                bag_loss = criterion(logits.unsqueeze(0), label_tensor)
+                inst_loss = inst_dict["inst_loss"]
+                loss = bag_weight * bag_loss + inst_weight * inst_loss
+                loss_sums["bag_loss"] += bag_loss.item()
+                loss_sums["inst_loss"] += inst_loss.item()
             else:
                 # Simple MIL: standard forward
                 logits, _, _ = model(features)
@@ -308,35 +244,47 @@ def train_one_epoch(
         total += batch_size
 
         pbar.set_postfix(
-            loss=f"{batch_loss.item():.4f}",
-            acc=f"{100.0 * correct / total:.1f}%"
+            loss=f"{batch_loss.item():.4f}", acc=f"{100.0 * correct / total:.1f}%"
         )
 
     avg_loss = running_loss / total
     avg_acc = 100.0 * correct / total
     train_f1 = f1_score(all_labels, all_preds, average="macro", zero_division=0)
-    train_f2 = fbeta_score(all_labels, all_preds, beta=2, average="macro", zero_division=0)
+    train_f2 = fbeta_score(
+        all_labels, all_preds, beta=2, average="macro", zero_division=0
+    )
     train_bacc = 100.0 * balanced_accuracy_score(all_labels, all_preds)
 
     # Per-class recall
     per_class_recall = recall_score(
-        all_labels, all_preds, average=None,
-        labels=list(range(len(CLASS_NAMES))), zero_division=0,
+        all_labels,
+        all_preds,
+        average=None,
+        labels=list(range(len(CLASS_NAMES))),
+        zero_division=0,
     )
     recall_list = [100.0 * r for r in per_class_recall]
 
     avg_components = {k: v / total for k, v in loss_sums.items()}
-    return avg_loss, avg_acc, train_f1, train_f2, train_bacc, recall_list, avg_components
+    return (
+        avg_loss,
+        avg_acc,
+        train_f1,
+        train_f2,
+        train_bacc,
+        recall_list,
+        avg_components,
+    )
 
 
 # ── validation & evaluation ──────────────────────────────────────────────
 @torch.no_grad()
 def validate_and_evaluate(
-        model: nn.Module,
-        loader: DataLoader,
-        criterion: nn.Module,
-        device: torch.device,
-        desc: str = "  Val  ",
+    model: nn.Module,
+    loader: DataLoader,
+    criterion: nn.Module,
+    device: torch.device,
+    desc: str = "  Val  ",
 ) -> Tuple[float, float, float, float, float, List[float], str, str]:
     """
     Validate/Test a MIL model and return metric strings.
@@ -363,7 +311,7 @@ def validate_and_evaluate(
 
         for i, features in enumerate(features_list):
             features = features.to(device)
-            label = labels[i:i + 1]
+            label = labels[i : i + 1]
 
             logits, _, _ = model(features)
             logits = logits.unsqueeze(0)
@@ -383,7 +331,9 @@ def validate_and_evaluate(
 
     # Compute imbalance-aware metrics
     f1_macro = f1_score(all_labels, all_preds, average="macro", zero_division=0)
-    f2_macro = fbeta_score(all_labels, all_preds, beta=2, average="macro", zero_division=0)
+    f2_macro = fbeta_score(
+        all_labels, all_preds, beta=2, average="macro", zero_division=0
+    )
     balanced_acc = 100.0 * balanced_accuracy_score(all_labels, all_preds)
 
     # Build confusion matrix string
@@ -398,7 +348,8 @@ def validate_and_evaluate(
 
     # Build classification report string
     report = classification_report(
-        all_labels, all_preds,
+        all_labels,
+        all_preds,
         target_names=CLASS_NAMES,
         digits=3,
         zero_division=0,
@@ -412,12 +363,24 @@ def validate_and_evaluate(
 
     # Per-class recall
     per_class_recall = recall_score(
-        all_labels, all_preds, average=None,
-        labels=list(range(len(CLASS_NAMES))), zero_division=0,
+        all_labels,
+        all_preds,
+        average=None,
+        labels=list(range(len(CLASS_NAMES))),
+        zero_division=0,
     )
     recall_list = [100.0 * r for r in per_class_recall]
 
-    return avg_loss, accuracy, f1_macro, f2_macro, balanced_acc, recall_list, cm_str, report_str
+    return (
+        avg_loss,
+        accuracy,
+        f1_macro,
+        f2_macro,
+        balanced_acc,
+        recall_list,
+        cm_str,
+        report_str,
+    )
 
 
 # ── argument parsing ─────────────────────────────────────────────────────
@@ -434,8 +397,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--model_type",
         default="simple",
-        choices=["simple", "dtfd"],
-        help="MIL model type: 'simple' (SimpleGatedMIL) or 'dtfd' (DTFD-MIL). Default: simple.",
+        choices=["simple", "dtfd", "clam_sb"],
+        help="MIL model type: 'simple' | 'dtfd' | 'clam_sb'. Default: simple.",
     )
     parser.add_argument(
         "--data_root",
@@ -475,6 +438,34 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Max patches per bag (for memory management).",
     )
+    parser.add_argument(
+        "--topk",
+        type=int,
+        default=0,
+        help="Top-k pooling: use mean of k highest-attention patches. 0 = standard attention (default: 0).",
+    )
+
+    # CLAM-SB specific arguments
+    parser.add_argument(
+        "--bag_weight",
+        type=float,
+        default=0.7,
+        help="Weight for bag-level loss in CLAM-SB (default: 0.7).",
+    )
+    parser.add_argument(
+        "--inst_weight",
+        type=float,
+        default=0.3,
+        help="Weight for instance clustering loss in CLAM-SB (default: 0.3).",
+    )
+
+    # Experiment tracking
+    parser.add_argument(
+        "--postfix",
+        type=str,
+        default="",
+        help="String to append to experiment directory, model checkpoint, and log file names.",
+    )
 
     return parser.parse_args()
 
@@ -486,9 +477,17 @@ def main() -> None:
 
     # Setup Experiment Directory
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    exp_dir = EXPERIMENTS_DIR / f"{args.model_type}_mil_{args.backbone}_{timestamp}"
+
+    # Build unified run_name for directory, log, and checkpoint
+    run_name = f"{args.model_type}_{args.backbone}"
+    if args.model_type == "simple" and args.topk > 0:
+        run_name += f"_topk{args.topk}"
+    if args.postfix:
+        run_name += f"_{args.postfix}"
+
+    exp_dir = EXPERIMENTS_DIR / f"{run_name}_{timestamp}"
     exp_dir.mkdir(parents=True, exist_ok=True)
-    log_file = exp_dir / "train.log"
+    log_file = exp_dir / f"{run_name}.log"
 
     # ── LOG CONFIGURATION ─────────────────────────────────────────────
     log(f"{'=' * 60}", log_file)
@@ -548,31 +547,44 @@ def main() -> None:
     )
 
     # ── Model ─────────────────────────────────────────────────────────
+    checkpoint_name = f"best_{run_name}.pth"
+
     if args.model_type == "simple":
         model = SimpleGatedMIL(
             input_dim=input_dim,
             num_classes=num_classes,
+            topk=args.topk,
         ).to(device)
-        checkpoint_name = f"best_simple_{args.backbone}.pth"
+    elif args.model_type == "clam_sb":
+        model = CLAM_SB(
+            input_dim=input_dim,
+            num_classes=num_classes,
+        ).to(device)
     else:
         model = DTFDMIL(
             input_dim=input_dim,
             num_classes=num_classes,
             num_pseudo_bags=args.num_pseudo_bags,
         ).to(device)
-        checkpoint_name = f"best_dtfd_{args.backbone}.pth"
 
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     log(f"\nModel: {args.model_type.upper()}", log_file)
-    log(f"  Parameters: {trainable_params:,} trainable / {total_params:,} total", log_file)
+    log(
+        f"  Parameters: {trainable_params:,} trainable / {total_params:,} total",
+        log_file,
+    )
 
     # ── Optimiser & loss ──────────────────────────────────────────────
+    # Class weights: ET=1.5, PV=3.5, PMF=1.0
+    # PV gets the highest weight to penalize missing it (improve recall)
+    class_weights = torch.tensor([1.5, 3.5, 1.0], device=device)
+
     if args.model_type == "simple":
-        criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
+        criterion = nn.CrossEntropyLoss(weight=class_weights, label_smoothing=0.1)
         optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=0.01)
     else:
-        criterion = nn.CrossEntropyLoss()
+        criterion = nn.CrossEntropyLoss(weight=class_weights)
         optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=0.01)
 
     scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=1e-6)
@@ -605,16 +617,42 @@ def main() -> None:
             print_header()
 
         # Train
-        train_loss, train_acc, train_f1, train_f2, train_bacc, train_recall, loss_components = train_one_epoch(
-            model, train_loader, criterion, optimizer, device,
+        (
+            train_loss,
+            train_acc,
+            train_f1,
+            train_f2,
+            train_bacc,
+            train_recall,
+            loss_components,
+        ) = train_one_epoch(
+            model,
+            train_loader,
+            criterion,
+            optimizer,
+            device,
             model_type=args.model_type,
             tier1_weight=args.tier1_weight,
             instance_weight=args.instance_weight,
+            bag_weight=args.bag_weight,
+            inst_weight=args.inst_weight,
         )
 
         # Validate
-        val_loss, val_acc, val_f1, val_f2, val_bacc, val_recall, val_cm_str, val_report_str = validate_and_evaluate(
-            model, val_loader, criterion, device,
+        (
+            val_loss,
+            val_acc,
+            val_f1,
+            val_f2,
+            val_bacc,
+            val_recall,
+            val_cm_str,
+            val_report_str,
+        ) = validate_and_evaluate(
+            model,
+            val_loader,
+            criterion,
+            device,
         )
 
         # Per-epoch logging (2-line table)
@@ -650,7 +688,10 @@ def main() -> None:
                 "args": vars(args),
             }
             torch.save(checkpoint, exp_dir / checkpoint_name)
-            log(f"     >>> ⭐ New Best Model! Val F2: {val_f2:.3f} | Acc: {val_acc:.1f}%", log_file)
+            log(
+                f"     >>> ⭐ New Best Model! Val F2: {val_f2:.3f} | Acc: {val_acc:.1f}%",
+                log_file,
+            )
             log(f"\n{val_cm_str}", log_file)
             log(f"\n{val_report_str}", log_file)
 
@@ -665,8 +706,20 @@ def main() -> None:
         checkpoint = torch.load(best_ckpt_path, map_location=device, weights_only=True)
         model.load_state_dict(checkpoint["model_state_dict"])
 
-        test_loss, test_acc, test_f1, test_f2, test_bacc, test_recall, test_cm_str, test_report_str = validate_and_evaluate(
-            model, test_loader, criterion, device,
+        (
+            test_loss,
+            test_acc,
+            test_f1,
+            test_f2,
+            test_bacc,
+            test_recall,
+            test_cm_str,
+            test_report_str,
+        ) = validate_and_evaluate(
+            model,
+            test_loader,
+            criterion,
+            device,
             desc="  Test ",
         )
 
