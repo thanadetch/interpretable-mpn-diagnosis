@@ -42,6 +42,7 @@ from core.config import CLASS_MAP, CLASS_MAP_INV, EXPERIMENTS_DIR, SEED
 from data.bag_dataset import MPNBagDatasetFull
 from models.clam import CLAM_SB
 from models.dtfd_mil import DTFDMIL, compute_dtfd_loss
+from models.hybrid_mil import HybridMIL
 from models.simple_mil import SimpleGatedMIL
 
 # ── backbone configuration ───────────────────────────────────────────────
@@ -397,8 +398,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--model_type",
         default="simple",
-        choices=["simple", "dtfd", "clam_sb"],
-        help="MIL model type: 'simple' | 'dtfd' | 'clam_sb'. Default: simple.",
+        choices=["simple", "dtfd", "clam_sb", "hybrid"],
+        help="MIL model type: 'simple' | 'dtfd' | 'clam_sb' | 'hybrid'. Default: simple.",
     )
     parser.add_argument(
         "--data_root",
@@ -560,6 +561,13 @@ def main() -> None:
             input_dim=input_dim,
             num_classes=num_classes,
         ).to(device)
+    elif args.model_type == "hybrid":
+        k = args.topk if args.topk > 0 else 5
+        model = HybridMIL(
+            input_dim=input_dim,
+            num_classes=num_classes,
+            topk=k,
+        ).to(device)
     else:
         model = DTFDMIL(
             input_dim=input_dim,
@@ -588,6 +596,13 @@ def main() -> None:
         optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=0.01)
 
     scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=1e-6)
+
+    # Debug: verify active class weights
+    weights_str = "  ".join(
+        f"{n}={w:.1f}" for n, w in zip(CLASS_NAMES, class_weights.tolist())
+    )
+    log(f"\nLoss: {criterion.__class__.__name__}", log_file)
+    log(f"Weights: {weights_str}", log_file)
 
     # ── Training loop ─────────────────────────────────────────────────
     best_val_f2 = 0.0
