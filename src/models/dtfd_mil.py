@@ -281,7 +281,7 @@ class DTFDMIL(nn.Module):
         self,
         pseudo_bag_features: torch.Tensor,
         return_attention: bool = False,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], torch.Tensor]:
         """
         Tier 2 forward pass.
 
@@ -292,17 +292,18 @@ class DTFDMIL(nn.Module):
         Returns:
             bag_logits: Bag-level predictions [C] or [B, C].
             attention: Attention weights (if return_attention=True).
+            aggregated: Aggregated bag representation [D] or [B, D].
         """
         aggregated, attention = self.tier2_attention(
             pseudo_bag_features, return_attention
         )
         bag_logits = self.bag_classifier(aggregated)
-        return bag_logits, attention
+        return bag_logits, attention, aggregated
 
     def forward_training(
         self,
         features: torch.Tensor,
-    ) -> Tuple[torch.Tensor, torch.Tensor, List[torch.Tensor]]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, List[torch.Tensor], torch.Tensor]:
         """
         Forward pass during training with pseudo-bag creation.
 
@@ -313,6 +314,7 @@ class DTFDMIL(nn.Module):
             bag_logits: Final bag-level logits [C].
             pseudo_bag_logits: Tier 1 logits for each pseudo-bag [K, C].
             instance_logits_list: List of instance logits per pseudo-bag.
+            aggregated: Tier 2 aggregated bag representation [D].
         """
         # Project features
         projected = self.projection(features)  # [N, proj_dim]
@@ -339,9 +341,9 @@ class DTFDMIL(nn.Module):
         pseudo_bag_logits = torch.stack(pseudo_bag_logits, dim=0)  # [K, C]
 
         # Tier 2: Aggregate pseudo-bags
-        bag_logits, _ = self.forward_tier2(pseudo_bag_features)  # [C]
+        bag_logits, _, bag_aggregated = self.forward_tier2(pseudo_bag_features)  # [C]
 
-        return bag_logits, pseudo_bag_logits, instance_logits_list
+        return bag_logits, pseudo_bag_logits, instance_logits_list, bag_aggregated
 
     def forward(
         self,
@@ -444,18 +446,16 @@ def compute_dtfd_loss(
 
     # Combined loss
     total_loss = (
-        bag_loss
-        + tier1_weight * pseudo_bag_loss
-        + instance_weight * instance_loss
+        bag_loss + tier1_weight * pseudo_bag_loss + instance_weight * instance_loss
     )
 
     loss_dict = {
         "bag_loss": bag_loss.item(),
         "pseudo_bag_loss": pseudo_bag_loss.item(),
-        "instance_loss": instance_loss.item() if isinstance(instance_loss, torch.Tensor) else instance_loss,
+        "instance_loss": instance_loss.item()
+        if isinstance(instance_loss, torch.Tensor)
+        else instance_loss,
         "total_loss": total_loss.item(),
     }
 
     return total_loss, loss_dict
-
-

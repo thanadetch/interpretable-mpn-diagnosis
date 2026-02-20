@@ -69,7 +69,7 @@ class HybridMIL(nn.Module):
         self,
         features: torch.Tensor,
         return_attention: bool = False,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], None]:
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], torch.Tensor]:
         """
         Args:
             features: Instance features [N, D].
@@ -78,7 +78,7 @@ class HybridMIL(nn.Module):
         Returns:
             logits: Bag-level logits [C].
             attention: Softmax attention weights [N] (if return_attention=True).
-            None: Placeholder for compatibility with other MIL models.
+            bag_embedding: Fused bag representation [2 * hidden_dim].
         """
         # Project
         h = self.projection(features)  # [N, hidden_dim]
@@ -102,5 +102,5 @@ class HybridMIL(nn.Module):
         logits = self.classifier(fused)  # [C]
 
         if return_attention:
-            return logits, attention, None
-        return logits, None, None
+            return logits, attention, fused
+        return logits, None, fused

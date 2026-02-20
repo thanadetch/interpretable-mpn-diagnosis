@@ -10,6 +10,7 @@ Two dataset variants are provided:
     - MPNBagDatasetFull: Returns full [N_patches, Dim] tensor (for attention-based MIL).
 """
 
+import hashlib
 from pathlib import Path
 from typing import List, Tuple
 
@@ -82,9 +83,11 @@ class MPNBagDatasetFull(Dataset):
         self,
         features_dir: Path,
         max_patches: int = None,
+        is_train: bool = False,
     ) -> None:
         self.samples: List[Tuple[Path, int]] = []
         self.max_patches = max_patches
+        self.is_train = is_train
 
         for class_name, label in CLASS_MAP.items():
             class_dir = features_dir / class_name
@@ -108,7 +111,16 @@ class MPNBagDatasetFull(Dataset):
 
         # Optionally limit number of patches
         if self.max_patches is not None and feat.size(0) > self.max_patches:
-            indices = torch.randperm(feat.size(0))[:self.max_patches]
+            if self.is_train:
+                # Stochastic sampling for training augmentation
+                indices = torch.randperm(feat.size(0))[: self.max_patches]
+            else:
+                # Deterministic sampling for validation consistency
+                g = torch.Generator()
+                path_bytes = str(pt_path).encode("utf-8")
+                file_seed = int(hashlib.md5(path_bytes).hexdigest(), 16) % (2**32)
+                g.manual_seed(file_seed)
+                indices = torch.randperm(feat.size(0), generator=g)[: self.max_patches]
             feat = feat[indices]
 
         slide_id = pt_path.stem
@@ -121,4 +133,3 @@ class MPNBagDatasetFull(Dataset):
     def get_slide_path(self, idx: int) -> Path:
         """Return the path to the .pt file for a given index."""
         return self.samples[idx][0]
-

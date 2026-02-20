@@ -84,3 +84,15 @@
 `python src/train_slide_encoder.py --features_dir data/features_titan --epochs 50 --lr 1e-4 --seed 42`
 
 `python src/tools/visualize_features.py --backbone titan`
+
+python src/visualize_heatmap \
+        --backbone titan \
+        --mil_checkpoint experiments/simple_mil_titan_20260218_042451/best_simple_titan.pth \
+        --patient_dir data/processed_subtype/PV/PV1 G2 \
+        --image_id 1 \
+        --output_dir results/heatmaps
+
+python src/visualize_heatmap.py \
+        --mil_checkpoint experiments/simple_mil_titan_20260218_042451/best_simple_titan.pth \
+        --patient_dir "data/processed_subtype/PMF/PMF1 G1" \
+        --output_dir results/heatmap

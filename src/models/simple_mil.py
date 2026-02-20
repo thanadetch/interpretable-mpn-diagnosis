@@ -64,7 +64,7 @@ class SimpleGatedMIL(nn.Module):
         self,
         features: torch.Tensor,
         return_attention: bool = False,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], None]:
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], torch.Tensor]:
         """
         Args:
             features: Instance features [N, D].
@@ -73,7 +73,7 @@ class SimpleGatedMIL(nn.Module):
         Returns:
             logits: Bag-level logits [C].
             attention: Attention weights [N] (if return_attention=True).
-            None: Placeholder for compatibility with DTFD signature.
+            bag_embedding: Aggregated bag representation [hidden_dim].
         """
         # Bottleneck
         h = self.bottleneck(features)  # [N, hidden_dim]
@@ -97,5 +97,5 @@ class SimpleGatedMIL(nn.Module):
         logits = self.classifier(aggregated)  # [C]
 
         if return_attention:
-            return logits, attention, None
-        return logits, None, None
+            return logits, attention, aggregated
+        return logits, None, aggregated

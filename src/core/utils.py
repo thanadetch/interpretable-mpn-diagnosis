@@ -436,16 +436,19 @@ class FocalLoss(nn.Module):
         self.reduction = reduction
 
     def forward(self, inputs, targets):
-        # Calculate standard Cross Entropy Loss (without reduction)
-        ce_loss = torch.nn.functional.cross_entropy(
+        # Unweighted CE to get true probability pt
+        ce_loss_unweighted = torch.nn.functional.cross_entropy(
+            inputs, targets, reduction="none"
+        )
+        pt = torch.exp(-ce_loss_unweighted)
+
+        # Weighted CE for class-balanced loss
+        ce_loss_weighted = torch.nn.functional.cross_entropy(
             inputs, targets, reduction="none", weight=self.alpha
         )
 
-        # Calculate probability of the true class (pt = exp(-ce_loss))
-        pt = torch.exp(-ce_loss)
-
-        # Calculate Focal term: (1 - pt)^gamma
-        focal_loss = ((1 - pt) ** self.gamma) * ce_loss
+        # Focal modulation: down-weight easy examples
+        focal_loss = ((1 - pt) ** self.gamma) * ce_loss_weighted
 
         if self.reduction == "mean":
             return focal_loss.mean()
@@ -453,6 +456,90 @@ class FocalLoss(nn.Module):
             return focal_loss.sum()
         else:
             return focal_loss
+
+
+class SupConLoss(nn.Module):
+    """
+    Supervised Contrastive Loss (Khosla et al., NeurIPS 2020).
+
+    Pulls embeddings of the same class together while pushing embeddings
+    of different classes apart in the representation space.
+
+    Args:
+        temperature: Scaling factor for similarity (default: 0.1).
+    """
+
+    def __init__(self, temperature: float = 0.1) -> None:
+        super().__init__()
+        self.temperature = temperature
+
+    def forward(
+        self,
+        features: torch.Tensor,
+        labels: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Compute SupCon loss.
+
+        Args:
+            features: L2-normalized embeddings [B, n_views, D].
+            labels: Ground truth labels [B].
+
+        Returns:
+            Scalar loss value.
+        """
+        device = features.device
+        batch_size = features.shape[0]
+
+        if batch_size < 2:
+            return torch.tensor(0.0, device=device, requires_grad=True)
+
+        # Flatten views: [B, n_views, D] → [B * n_views, D]
+        n_views = features.shape[1]
+        contrast_features = features.reshape(batch_size * n_views, -1)
+
+        # Repeat labels for each view: [B] → [B * n_views]
+        labels = labels.contiguous().view(-1)
+        if n_views > 1:
+            labels = labels.repeat(n_views)
+
+        total = contrast_features.shape[0]
+
+        # Pairwise cosine similarity scaled by temperature: [total, total]
+        similarity = torch.mm(contrast_features, contrast_features.T) / self.temperature
+
+        # Mask out self-similarity (diagonal)
+        self_mask = torch.eye(total, dtype=torch.bool, device=device)
+
+        # Positive mask: same label, different index
+        label_eq = labels.unsqueeze(0) == labels.unsqueeze(1)  # [total, total]
+        pos_mask = label_eq & ~self_mask
+
+        # Check: need at least 1 positive pair in the batch
+        if pos_mask.sum() == 0:
+            return torch.tensor(0.0, device=device, requires_grad=True)
+
+        # For numerical stability, subtract max from each row
+        logits_max, _ = similarity.max(dim=1, keepdim=True)
+        logits = similarity - logits_max.detach()
+
+        # Denominator: sum of exp(similarity) over all non-self entries
+        exp_logits = torch.exp(logits) * (~self_mask).float()
+        log_denom = torch.log(exp_logits.sum(dim=1, keepdim=True) + 1e-12)
+
+        # Log-prob for each pair: log(exp(sim_ij) / sum_k≠i exp(sim_ik))
+        log_prob = logits - log_denom
+
+        # Mean of log-prob over positive pairs, per anchor
+        pos_per_anchor = pos_mask.float().sum(dim=1)  # [total]
+        valid = pos_per_anchor > 0
+
+        mean_log_prob = (pos_mask.float() * log_prob).sum(dim=1)[
+            valid
+        ] / pos_per_anchor[valid]
+
+        loss = -mean_log_prob.mean()
+        return loss
 
 
 class EMDLoss(nn.Module):

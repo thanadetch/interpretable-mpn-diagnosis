@@ -39,6 +39,7 @@ from sklearn.metrics import (
 from tqdm import tqdm
 
 from core.config import CLASS_MAP, CLASS_MAP_INV, EXPERIMENTS_DIR, SEED
+from core.utils import FocalLoss, SupConLoss
 from data.bag_dataset import MPNBagDatasetFull
 from models.clam import CLAM_SB
 from models.dtfd_mil import DTFDMIL, compute_dtfd_loss
@@ -174,6 +175,8 @@ def train_one_epoch(
     instance_weight: float = 0.2,
     bag_weight: float = 0.7,
     inst_weight: float = 0.3,
+    criterion_supcon: Optional[nn.Module] = None,
+    supcon_weight: float = 0.5,
 ) -> Tuple[float, float, float, float, float, List[float], dict]:
     """Train for one epoch. Handles 'simple', 'dtfd', and 'clam_sb' model types."""
     model.train()
@@ -190,12 +193,17 @@ def train_one_epoch(
         batch_loss = torch.tensor(0.0, device=device, requires_grad=True)
         batch_correct = 0
 
+        # Collect batch-level embeddings for SupConLoss (simple/hybrid only)
+        batch_logits_list = []
+        batch_embeddings_list = []
+        batch_labels_list = []
+
         for i, features in enumerate(features_list):
             features = features.to(device)  # [N, D]
             label = labels[i].item()
 
             if model_type == "dtfd":
-                bag_logits, pseudo_bag_logits, instance_logits_list = (
+                bag_logits, pseudo_bag_logits, instance_logits_list, bag_embedding = (
                     model.forward_training(features)
                 )
                 loss, loss_dict = compute_dtfd_loss(
@@ -209,6 +217,11 @@ def train_one_epoch(
                 )
                 for key, value in loss_dict.items():
                     loss_sums[key] += value
+                batch_loss = batch_loss + loss
+                # Collect for SupCon
+                bag_emb_norm = torch.nn.functional.normalize(bag_embedding, dim=0)
+                batch_embeddings_list.append(bag_emb_norm)
+                batch_labels_list.append(label)
             elif model_type == "clam_sb":
                 # CLAM-SB: bag loss + instance clustering loss
                 logits, inst_dict = model.forward_training(features, bag_label=label)
@@ -218,14 +231,15 @@ def train_one_epoch(
                 loss = bag_weight * bag_loss + inst_weight * inst_loss
                 loss_sums["bag_loss"] += bag_loss.item()
                 loss_sums["inst_loss"] += inst_loss.item()
+                batch_loss = batch_loss + loss
             else:
-                # Simple MIL: standard forward
-                logits, _, _ = model(features)
-                label_tensor = torch.tensor([label], device=device)
-                loss = criterion(logits.unsqueeze(0), label_tensor)
-                loss_sums["bag_loss"] += loss.item()
-
-            batch_loss = batch_loss + loss
+                # Simple / Hybrid MIL: collect logits & embeddings
+                logits, _, bag_embedding = model(features)
+                batch_logits_list.append(logits.unsqueeze(0))  # [1, C]
+                # L2-normalize bag embedding for contrastive learning
+                bag_emb_norm = torch.nn.functional.normalize(bag_embedding, dim=0)
+                batch_embeddings_list.append(bag_emb_norm)
+                batch_labels_list.append(label)
 
             pred = (bag_logits if model_type == "dtfd" else logits).argmax().item()
             batch_correct += int(pred == label)
@@ -233,7 +247,28 @@ def train_one_epoch(
             all_labels.append(label)
 
         batch_size = len(features_list)
-        batch_loss = batch_loss / batch_size
+
+        # 1. Classification Loss (Only for Simple/Hybrid)
+        if batch_logits_list:
+            stacked_logits = torch.cat(batch_logits_list, dim=0)  # [B, C]
+            stacked_labels_cls = torch.tensor(batch_labels_list, device=device)
+            loss_cls = criterion(stacked_logits, stacked_labels_cls)
+            loss_sums["cls_loss"] += loss_cls.item() * batch_size
+            batch_loss = batch_loss + loss_cls
+
+        # 2. Average the accumulated sums (Only for DTFD/CLAM)
+        if model_type in ("dtfd", "clam_sb"):
+            batch_loss = batch_loss / batch_size
+
+        # 3. SupConLoss (For all applicable models)
+        if criterion_supcon is not None and len(batch_embeddings_list) >= 2:
+            stacked_labels_sup = torch.tensor(batch_labels_list, device=device)
+            stacked_emb = torch.stack(batch_embeddings_list)  # [B, D]
+            stacked_emb = stacked_emb.unsqueeze(1)  # [B, 1, D]
+            loss_sup = criterion_supcon(stacked_emb, stacked_labels_sup)
+            loss_sums["supcon_loss"] += loss_sup.item() * batch_size
+            # Add directly without dividing, as loss_sup is already a batch mean
+            batch_loss = batch_loss + (supcon_weight * loss_sup)
 
         optimizer.zero_grad()
         batch_loss.backward()
@@ -314,8 +349,11 @@ def validate_and_evaluate(
             features = features.to(device)
             label = labels[i : i + 1]
 
-            logits, _, _ = model(features)
-            logits = logits.unsqueeze(0)
+            # Safely handle models returning any number of items
+            outputs = model(features)
+            logits = outputs[0] if isinstance(outputs, tuple) else outputs
+            if logits.dim() == 1:
+                logits = logits.unsqueeze(0)  # [C] → [1, C]
 
             loss = criterion(logits, label)
             running_loss += loss.item()
@@ -406,9 +444,9 @@ def parse_args() -> argparse.Namespace:
         default="data",
         help="Root data directory (default: data).",
     )
-    parser.add_argument("--epochs", type=int, default=50, help="Training epochs.")
+    parser.add_argument("--epochs", type=int, default=400, help="Training epochs.")
     parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate.")
-    parser.add_argument("--batch_size", type=int, default=1, help="Batch size.")
+    parser.add_argument("--batch_size", type=int, default=32, help="Batch size.")
     parser.add_argument("--seed", type=int, default=SEED, help="Random seed.")
     parser.add_argument(
         "--num_workers", type=int, default=4, help="DataLoader workers."
@@ -513,17 +551,27 @@ def main() -> None:
 
     # ── Data ──────────────────────────────────────────────────────────
     log(f"\nLoading {display_name} features from: {features_dir}", log_file)
-    full_dataset = MPNBagDatasetFull(features_dir, max_patches=args.max_patches)
-    log(f"  Total bags: {len(full_dataset)}", log_file)
+    base_dataset = MPNBagDatasetFull(
+        features_dir, max_patches=args.max_patches, is_train=False
+    )
+    log(f"  Total bags: {len(base_dataset)}", log_file)
 
-    train_idx, val_idx, test_idx = patient_split(full_dataset, seed=args.seed)
+    train_idx, val_idx, test_idx = patient_split(base_dataset, seed=args.seed)
     log(
         f"  Split -- Train: {len(train_idx)} | Val: {len(val_idx)} | Test: {len(test_idx)}",
         log_file,
     )
 
+    # Separate datasets: stochastic for training, deterministic for eval
+    train_dataset = MPNBagDatasetFull(
+        features_dir, max_patches=args.max_patches, is_train=True
+    )
+    eval_dataset = MPNBagDatasetFull(
+        features_dir, max_patches=args.max_patches, is_train=False
+    )
+
     train_loader = DataLoader(
-        Subset(full_dataset, train_idx),
+        Subset(train_dataset, train_idx),
         batch_size=args.batch_size,
         shuffle=True,
         num_workers=args.num_workers,
@@ -531,7 +579,7 @@ def main() -> None:
         collate_fn=collate_bags,
     )
     val_loader = DataLoader(
-        Subset(full_dataset, val_idx),
+        Subset(eval_dataset, val_idx),
         batch_size=args.batch_size,
         shuffle=False,
         num_workers=args.num_workers,
@@ -539,7 +587,7 @@ def main() -> None:
         collate_fn=collate_bags,
     )
     test_loader = DataLoader(
-        Subset(full_dataset, test_idx),
+        Subset(eval_dataset, test_idx),
         batch_size=args.batch_size,
         shuffle=False,
         num_workers=args.num_workers,
@@ -583,17 +631,23 @@ def main() -> None:
         log_file,
     )
 
-    # ── Optimiser & loss ──────────────────────────────────────────────
-    # Class weights: ET=1.5, PV=3.5, PMF=1.0
-    # PV gets the highest weight to penalize missing it (improve recall)
-    class_weights = torch.tensor([1.5, 3.5, 1.0], device=device)
+    # Class weights mapped dynamically from CLASS_MAP
+    # ET = 1.5, PV = 3.5, PMF = 1.0
+    _weight_map = {"ET": 1.5, "PV": 3.5, "PMF": 1.0}
+    num_classes = len(CLASS_MAP)
+    _weights = [1.0] * num_classes
+    for name, idx in CLASS_MAP.items():
+        _weights[idx] = _weight_map.get(name, 1.0)
+    class_weights = torch.tensor(_weights, dtype=torch.float32, device=device)
+    criterion = FocalLoss(alpha=class_weights, gamma=2.0, reduction="mean").to(device)
+    optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=0.01)
 
-    if args.model_type == "simple":
-        criterion = nn.CrossEntropyLoss(weight=class_weights, label_smoothing=0.1)
-        optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=0.01)
-    else:
-        criterion = nn.CrossEntropyLoss(weight=class_weights)
-        optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=0.01)
+    # SupConLoss for simple/hybrid/dtfd models
+    criterion_supcon = None
+    supcon_weight = 0.5
+    if args.model_type in ("simple", "hybrid", "dtfd"):
+        criterion_supcon = SupConLoss(temperature=0.1)
+        log(f"\nSupConLoss: enabled (weight={supcon_weight}, tau=0.1)", log_file)
 
     scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=1e-6)
 
@@ -651,6 +705,8 @@ def main() -> None:
             instance_weight=args.instance_weight,
             bag_weight=args.bag_weight,
             inst_weight=args.inst_weight,
+            criterion_supcon=criterion_supcon,
+            supcon_weight=supcon_weight,
         )
 
         # Validate
