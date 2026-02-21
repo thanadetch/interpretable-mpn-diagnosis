@@ -70,6 +70,59 @@ CLASS_NAMES = [CLASS_MAP_INV[i] for i in range(len(CLASS_MAP))]
 warnings.filterwarnings("ignore", message="y_pred contains classes not in y_true")
 
 
+# ── supervised contrastive loss ──────────────────────────────────────────
+class SupConLoss(nn.Module):
+    """Supervised Contrastive Loss (Khosla et al., NeurIPS 2020).
+
+    Operates on L2-normalised bag embeddings. For each anchor, positives are
+    all other samples sharing the same label, negatives are the rest.
+    Requires at least 2 samples per batch.
+    """
+
+    def __init__(self, temperature: float = 1.0) -> None:
+        super().__init__()
+        self.temperature = temperature
+
+    def forward(self, features: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            features: L2-normalised embeddings [B, D].
+            labels:   Class labels [B].
+
+        Returns:
+            Scalar contrastive loss.
+        """
+        device = features.device
+        batch_size = features.shape[0]
+
+        # Pairwise cosine similarity (features already L2-normed)
+        sim_matrix = torch.mm(features, features.T) / self.temperature  # [B, B]
+
+        # Mask: same-class pairs (excluding self)
+        labels = labels.view(-1, 1)
+        mask_pos = torch.eq(labels, labels.T).float().to(device)  # [B, B]
+        mask_self = torch.eye(batch_size, device=device)
+        mask_pos = mask_pos - mask_self  # exclude self-pairs
+
+        # For numerical stability, subtract max from each row
+        logits_max, _ = sim_matrix.max(dim=1, keepdim=True)
+        logits = sim_matrix - logits_max.detach()
+
+        # Denominator: sum over all non-self pairs
+        exp_logits = torch.exp(logits) * (1 - mask_self)
+        log_prob = logits - torch.log(exp_logits.sum(dim=1, keepdim=True) + 1e-12)
+
+        # Mean of log-prob over positive pairs
+        num_pos = mask_pos.sum(dim=1)  # [B]
+        mean_log_prob = (mask_pos * log_prob).sum(dim=1) / (num_pos + 1e-12)
+
+        # Only include anchors that have at least one positive
+        valid = (num_pos > 0).float()
+        loss = -(valid * mean_log_prob).sum() / (valid.sum() + 1e-12)
+
+        return loss
+
+
 # ── helpers ───────────────────────────────────────────────────────────────
 def set_seed(seed: int) -> None:
     """Set all random seeds for reproducibility."""
@@ -174,6 +227,8 @@ def train_one_epoch(
     instance_weight: float = 0.2,
     bag_weight: float = 0.7,
     inst_weight: float = 0.3,
+    epoch: int = 1,
+    total_epochs: int = 50,
 ) -> Tuple[float, float, float, float, float, List[float], dict]:
     """Train for one epoch. Handles 'simple', 'dtfd', and 'clam_sb' model types."""
     model.train()
@@ -181,6 +236,10 @@ def train_one_epoch(
     correct = 0
     total = 0
     loss_sums = defaultdict(float)
+
+    # SC-MIL: progressive weighting — contrastive term decays during training
+    beta_t = 1.0 - (epoch / total_epochs)
+    scl_criterion = SupConLoss(temperature=1.0)
     all_preds = []
     all_labels = []
 
@@ -189,6 +248,7 @@ def train_one_epoch(
         labels = labels.to(device)
         batch_loss = torch.tensor(0.0, device=device, requires_grad=True)
         batch_correct = 0
+        batch_z: List[torch.Tensor] = []  # SC-MIL: collect bag embeddings
 
         for i, features in enumerate(features_list):
             features = features.to(device)  # [N, D]
@@ -220,12 +280,17 @@ def train_one_epoch(
                 loss_sums["inst_loss"] += inst_loss.item()
             else:
                 # Simple MIL: standard forward
-                logits, _, _ = model(features)
+                logits, _, z = model(features)
                 label_tensor = torch.tensor([label], device=device)
-                loss = criterion(logits.unsqueeze(0), label_tensor)
-                loss_sums["bag_loss"] += loss.item()
+                loss_ce = criterion(logits.unsqueeze(0), label_tensor)
+                loss_sums["bag_loss"] += loss_ce.item()
+                batch_z.append(z.unsqueeze(0))  # [1, 128]
 
-            batch_loss = batch_loss + loss
+            # SC-MIL Eq.7: weight CE by (1 - beta_t) for simple; others unchanged
+            if model_type == "simple":
+                batch_loss = batch_loss + ((1.0 - beta_t) * loss_ce)
+            else:
+                batch_loss = batch_loss + loss
 
             pred = (bag_logits if model_type == "dtfd" else logits).argmax().item()
             batch_correct += int(pred == label)
@@ -233,6 +298,16 @@ def train_one_epoch(
             all_labels.append(label)
 
         batch_size = len(features_list)
+
+        # SC-MIL: add supervised contrastive loss if enough bags in batch
+        if len(batch_z) > 1:
+            stacked_z = torch.cat(batch_z, dim=0)  # [B, 128]
+            loss_scl = scl_criterion(stacked_z, labels)
+            # Multiply by batch_size: scl_criterion returns a mean, but
+            # batch_loss accumulates sums and is divided by batch_size below.
+            batch_loss = batch_loss + (beta_t * loss_scl * batch_size)
+            loss_sums["loss_scl"] += loss_scl.item() * batch_size
+
         batch_loss = batch_loss / batch_size
 
         optimizer.zero_grad()
@@ -651,6 +726,8 @@ def main() -> None:
             instance_weight=args.instance_weight,
             bag_weight=args.bag_weight,
             inst_weight=args.inst_weight,
+            epoch=epoch,
+            total_epochs=args.epochs,
         )
 
         # Validate

@@ -5,6 +5,7 @@ Architecture:
     Bottleneck: Linear(input_dim, 128) -> ReLU -> Dropout(0.5)
     Gated Attention: tanh/sigmoid gating -> softmax attention
     Classifier: Linear(128, num_classes)
+    Projector: Linear(128, 128) -> ReLU -> Linear(128, 128) (for SC-MIL)
 
 Supports optional Top-k pooling: when topk > 0, selects the k
 highest-attention patches and mean-pools instead of attention-weighted avg.
@@ -25,7 +26,8 @@ class SimpleGatedMIL(nn.Module):
         Gated Attention: tanh/sigmoid gating -> softmax attention
         Classifier: Linear(128, num_classes)
 
-    Returns (logits, attention_weights, None) to match DTFD forward signature.
+    Returns (logits, attention_weights, z) where z is the L2-normalised
+    bag embedding from the projector (for SC-MIL contrastive learning).
     """
 
     def __init__(
@@ -60,11 +62,18 @@ class SimpleGatedMIL(nn.Module):
         # Classifier
         self.classifier = nn.Linear(hidden_dim, num_classes)
 
+        # Projector head for SC-MIL contrastive learning
+        self.projector = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(inplace=True),
+            nn.Linear(hidden_dim, 128),
+        )
+
     def forward(
         self,
         features: torch.Tensor,
         return_attention: bool = False,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], None]:
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], torch.Tensor]:
         """
         Args:
             features: Instance features [N, D].
@@ -73,7 +82,7 @@ class SimpleGatedMIL(nn.Module):
         Returns:
             logits: Bag-level logits [C].
             attention: Attention weights [N] (if return_attention=True).
-            None: Placeholder for compatibility with DTFD signature.
+            z: L2-normalised projected bag embedding [128].
         """
         # Bottleneck
         h = self.bottleneck(features)  # [N, hidden_dim]
@@ -96,6 +105,9 @@ class SimpleGatedMIL(nn.Module):
         # Classification
         logits = self.classifier(aggregated)  # [C]
 
+        # Projection for contrastive learning
+        z = F.normalize(self.projector(aggregated), dim=-1)  # [128]
+
         if return_attention:
-            return logits, attention, None
-        return logits, None, None
+            return logits, attention, z
+        return logits, None, z
