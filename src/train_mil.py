@@ -44,6 +44,8 @@ from models.clam import CLAM_SB
 from models.dtfd_mil import DTFDMIL, compute_dtfd_loss
 from models.hybrid_mil import HybridMIL
 from models.simple_mil import SimpleGatedMIL
+from models.vl_mil import VisionLanguage_MIL
+from huggingface_hub import login
 
 # ── backbone configuration ───────────────────────────────────────────────
 BACKBONE_CONFIG: Dict[str, Dict] = {
@@ -68,6 +70,86 @@ CLASS_NAMES = [CLASS_MAP_INV[i] for i in range(len(CLASS_MAP))]
 
 # Suppress sklearn warning when y_pred contains classes absent from y_true
 warnings.filterwarnings("ignore", message="y_pred contains classes not in y_true")
+
+# ── Medical text prompts for VisionLanguage MIL (prompt ensembling) ──────
+MPN_TEXT_PROMPTS = {
+    "ET": [
+        "Bone marrow trephine biopsy showing strictly normocellular marrow for age with giant mature megakaryocytes.",
+        "Prominent proliferation of very large to giant megakaryocytes featuring deeply hyperlobated, staghorn-like nuclei.",
+        "Normocellular bone marrow showing loosely dispersed giant megakaryocytes without reticulin fibrosis.",
+        "Proliferation of mature megakaryocytes with staghorn nuclei, crucially lacking significant erythroid hyperplasia.",
+        "Large to giant mature megakaryocytes in a normocellular background, with absolute absence of panmyelosis.",
+    ],
+    "PV": [
+        "Bone marrow trephine biopsy showing striking hypercellularity for age characterized by clear panmyelosis.",
+        "Prominent trilineage hyperplasia heavily dominated by marked erythroid and granulocytic proliferation.",
+        "Panmyelosis forming distinct erythroid islands with pleomorphic megakaryocytes of varying sizes.",
+        "Hypercellular marrow with loose cohesive clusters of megakaryocytes that explicitly lack severe nuclear atypia.",
+        "Striking erythroid hyperplasia with pleomorphic megakaryocytes, crucially showing absolutely no reticulin fibrosis.",
+    ],
+    "PMF": [
+        "Bone marrow trephine biopsy showing characteristic overt fibrotic features, marked by dense reticulin or collagen fibrosis.",
+        "The marrow contains dense, tight clusters of highly atypical megakaryocytes with severe morphological dysplasia.",
+        "Atypical megakaryocytes distinctively featuring bulbous, cloud-like, hyperchromatic, and aberrantly hypolobated nuclei.",
+        "Overt fibrotic marrow and frequent osteosclerosis accompanied by highly dysplastic megakaryocytes.",
+        "Dense reticulin fibrosis with tight clusters of atypical megakaryocytes exhibiting irregularly folded nuclei.",
+    ],
+}
+
+
+def get_text_prototypes(device: torch.device, feature_dim: int = 768) -> torch.Tensor:
+    """
+    Generate ensembled text prototypes for VisionLanguage MIL.
+
+    For each class, encodes 5 diverse prompts via TITAN's text encoder,
+    mean-pools them into a single class embedding, then L2-normalises.
+
+    Args:
+        device:      Target device.
+        feature_dim: Embedding dimension (must match backbone, e.g. 768).
+
+    Returns:
+        Frozen, L2-normalised tensor of shape [3, feature_dim].
+    """
+    from transformers import AutoModel, AutoTokenizer  # local import
+
+    login()
+    print("  Loading TITAN text encoder for prototype generation...")
+    titan = AutoModel.from_pretrained("MahmoodLab/TITAN", trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(
+        "MahmoodLab/TITAN", trust_remote_code=True
+    )
+
+    titan = titan.to(device).eval()
+
+    # Encode each class's prompts and mean-pool
+    class_embeddings = []
+    for class_name in CLASS_NAMES:  # ET, PV, PMF (ordered by class index)
+        prompts = MPN_TEXT_PROMPTS[class_name]
+
+        input_ids = tokenizer(
+            prompts,
+            padding=True,
+            return_tensors="pt",
+        )["input_ids"].to(device)
+
+        with torch.no_grad():
+            text_features = titan.encode_text(input_ids)  # [5, feature_dim]
+
+        class_embedding = text_features.mean(dim=0)  # [feature_dim]
+        class_embeddings.append(class_embedding)
+
+    # Stack and L2-normalise
+    prototypes = torch.stack(class_embeddings, dim=0)  # [3, feature_dim]
+    prototypes = torch.nn.functional.normalize(prototypes.float(), p=2, dim=-1)
+
+    # Free encoder to reclaim GPU memory
+    del titan, tokenizer
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+    print(f"  ✅ Text prototypes generated (ensembled): {prototypes.shape}")
+    return prototypes.to(device).requires_grad_(False)
 
 
 # ── helpers ───────────────────────────────────────────────────────────────
@@ -174,6 +256,7 @@ def train_one_epoch(
     instance_weight: float = 0.2,
     bag_weight: float = 0.7,
     inst_weight: float = 0.3,
+    text_prototypes: Optional[torch.Tensor] = None,
 ) -> Tuple[float, float, float, float, float, List[float], dict]:
     """Train for one epoch. Handles 'simple', 'dtfd', and 'clam_sb' model types."""
     model.train()
@@ -218,6 +301,12 @@ def train_one_epoch(
                 loss = bag_weight * bag_loss + inst_weight * inst_loss
                 loss_sums["bag_loss"] += bag_loss.item()
                 loss_sums["inst_loss"] += inst_loss.item()
+            elif model_type == "vl":
+                # VisionLanguage MIL: pass text prototypes
+                logits, _ = model(features, text_prototypes)
+                label_tensor = torch.tensor([label], device=device)
+                loss = criterion(logits.unsqueeze(0), label_tensor)
+                loss_sums["bag_loss"] += loss.item()
             else:
                 # Simple MIL: standard forward
                 logits, _, _ = model(features)
@@ -286,6 +375,7 @@ def validate_and_evaluate(
     criterion: nn.Module,
     device: torch.device,
     desc: str = "  Val  ",
+    text_prototypes: Optional[torch.Tensor] = None,
 ) -> Tuple[float, float, float, float, float, List[float], str, str]:
     """
     Validate/Test a MIL model and return metric strings.
@@ -314,7 +404,10 @@ def validate_and_evaluate(
             features = features.to(device)
             label = labels[i : i + 1]
 
-            logits, _, _ = model(features)
+            if text_prototypes is not None:
+                logits, _ = model(features, text_prototypes)
+            else:
+                logits, _, _ = model(features)
             logits = logits.unsqueeze(0)
 
             loss = criterion(logits, label)
@@ -398,8 +491,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--model_type",
         default="simple",
-        choices=["simple", "dtfd", "clam_sb", "hybrid"],
-        help="MIL model type: 'simple' | 'dtfd' | 'clam_sb' | 'hybrid'. Default: simple.",
+        choices=["simple", "dtfd", "clam_sb", "hybrid", "vl"],
+        help="MIL model type: 'simple' | 'dtfd' | 'clam_sb' | 'hybrid' | 'vl'. Default: simple.",
     )
     parser.add_argument(
         "--data_root",
@@ -550,11 +643,29 @@ def main() -> None:
     # ── Model ─────────────────────────────────────────────────────────
     checkpoint_name = f"best_{run_name}.pth"
 
+    # VisionLanguage MIL: create frozen text prototypes
+    text_prototypes = None
+    if args.model_type == "vl":
+        text_prototypes = get_text_prototypes(device, feature_dim=input_dim)
+        log(
+            f"\nText Prototypes: {text_prototypes.shape}  (frozen, ensembled)", log_file
+        )
+        for i, name in enumerate(CLASS_NAMES):
+            log(
+                f"  Class {i} ({name}): {len(MPN_TEXT_PROMPTS[name])} prompts", log_file
+            )
+            for j, prompt in enumerate(MPN_TEXT_PROMPTS[name]):
+                log(f"    [{j}] {prompt}", log_file)
+
     if args.model_type == "simple":
         model = SimpleGatedMIL(
             input_dim=input_dim,
             num_classes=num_classes,
             topk=args.topk,
+        ).to(device)
+    elif args.model_type == "vl":
+        model = VisionLanguage_MIL(
+            feature_dim=input_dim,
         ).to(device)
     elif args.model_type == "clam_sb":
         model = CLAM_SB(
@@ -651,6 +762,7 @@ def main() -> None:
             instance_weight=args.instance_weight,
             bag_weight=args.bag_weight,
             inst_weight=args.inst_weight,
+            text_prototypes=text_prototypes,
         )
 
         # Validate
@@ -668,6 +780,7 @@ def main() -> None:
             val_loader,
             criterion,
             device,
+            text_prototypes=text_prototypes,
         )
 
         # Per-epoch logging (2-line table)
@@ -736,6 +849,7 @@ def main() -> None:
             criterion,
             device,
             desc="  Test ",
+            text_prototypes=text_prototypes,
         )
 
         log(f"\n{test_cm_str}", log_file)
