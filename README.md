@@ -58,6 +58,7 @@
 `python src/data/preprocess.py --patch_size 512 --step_size 256`
 `python src/data/preprocess.py --stain reti --patch_size 224 --step_size 112 --output_dir data/processed_grading`
 `python src/data/preprocess.py --stain he --patch_size 512 --step_size 256 --output_dir data/processed_subtype`
+`python src/data/preprocess.py --stain he --patch_size 224 --step_size 112 --output_dir data/processed_subtype`
 
 `python src/janitor/run_janitor.py --task grading --model_path experiments/janitor_grading_20260202_143052/janitor_model_grading.pth`
 
@@ -84,3 +85,11 @@
 `python src/train_slide_encoder.py --features_dir data/features_titan --epochs 50 --lr 1e-4 --seed 42`
 
 `python src/tools/visualize_features.py --backbone titan`
+
+`python src/visualize_heatmap.py \
+    --mil_checkpoint experiments/simple_mil_titan_20260218_042451/best_simple_titan.pth \
+    --patient_dir "data/processed_subtype/PMF/PMF4 G2" \
+    --image_id 1`
+
+`python src/tools/visualize_test_set.py \
+    --mil_checkpoint experiments/simple_mil_titan_20260218_042451/best_simple_titan.pth`

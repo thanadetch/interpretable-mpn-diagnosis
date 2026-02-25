@@ -21,16 +21,20 @@ Usage:
 
 import argparse
 import re
+import sys
 from collections import defaultdict
 from pathlib import Path
 from typing import Dict, List, Tuple
+
+# Ensure src/ is on sys.path when running directly (e.g., python src/tools/extract_titan.py)
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import torch
 from PIL import Image
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 from transformers import AutoModel
-from huggingface_hub import login
+from core.config import hf_login
 
 # =============================================================================
 # Constants
@@ -239,7 +243,7 @@ def run_extraction(args: argparse.Namespace) -> None:
     # Load CONCHv1.5 (via TITAN)
     # ------------------------------------------------------------------
     print("\nLoading TITAN + CONCHv1.5...")
-    login()
+    hf_login()
     titan = AutoModel.from_pretrained("MahmoodLab/TITAN", trust_remote_code=True)
     conch, eval_transform = titan.return_conch()
     conch = conch.to(device)

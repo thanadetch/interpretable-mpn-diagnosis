@@ -33,7 +33,7 @@ import torch.nn.functional as F
 from PIL import Image
 from tqdm import tqdm
 
-from core.config import CLASS_MAP, CLASS_MAP_INV, RESULTS_DIR
+from core.config import CLASS_MAP, CLASS_MAP_INV, RESULTS_DIR, hf_login
 from models.hybrid_mil import HybridMIL
 from models.simple_mil import SimpleGatedMIL
 
@@ -177,9 +177,7 @@ def load_backbone(
         transform: Preprocessing transform for patches.
         get_attention: Function(patch_tensor) → np.ndarray [grid_h, grid_w]
     """
-    from huggingface_hub import login
-
-    login()
+    hf_login()
 
     if backbone_name == "titan":
         from transformers import AutoModel

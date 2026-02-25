@@ -21,9 +21,13 @@ Usage:
 
 import argparse
 import re
+import sys
 from collections import defaultdict
 from pathlib import Path
 from typing import Dict, List, Tuple
+
+# Ensure src/ is on sys.path when running directly (e.g., python src/tools/extract_virchow2.py)
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import timm
 import torch
@@ -33,7 +37,7 @@ from timm.data.transforms_factory import create_transform
 from timm.layers import SwiGLUPacked
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
-from huggingface_hub import login
+from core.config import hf_login
 
 # =============================================================================
 # Constants
@@ -248,7 +252,7 @@ def run_extraction(args: argparse.Namespace) -> None:
     # Load Virchow2
     # ------------------------------------------------------------------
     print("\nLoading Virchow2...")
-    login()
+    hf_login()
     model = timm.create_model(
         "hf-hub:paige-ai/Virchow2",
         pretrained=True,

@@ -120,3 +120,53 @@ IMAGE_EXTENSIONS: tuple = (".tif", ".tiff", ".png", ".jpg", ".jpeg")
 # Model Configuration
 # ============================================================================
 SUPPORTED_MODELS: tuple = ("resnet18", "densenet121")
+
+
+# ============================================================================
+# Hugging Face Authentication
+# ============================================================================
+
+
+def hf_login() -> None:
+    """
+    Log in to Hugging Face Hub without interactive token entry.
+
+    Resolution order:
+        1. HF_TOKEN environment variable
+        2. Previously cached token (~/.cache/huggingface/token)
+
+    Setup (one-time):
+        - Local:  export HF_TOKEN='hf_...' in ~/.zshrc
+        - Colab:  In a notebook cell BEFORE running scripts:
+                    from google.colab import userdata
+                    import os
+                    os.environ["HF_TOKEN"] = userdata.get("HF_TOKEN")
+    """
+    import os
+
+    from huggingface_hub import login
+
+    # 1. Environment variable (works everywhere including Colab)
+    token = os.environ.get("HF_TOKEN")
+    if token:
+        login(token=token, add_to_git_credential=False)
+        print("  ✅ HF login via HF_TOKEN env var")
+        return
+
+    # 2. Cached token file
+    token_path = Path.home() / ".cache" / "huggingface" / "token"
+    if token_path.exists():
+        token = token_path.read_text().strip()
+        if token:
+            login(token=token, add_to_git_credential=False)
+            print("  ✅ HF login via cached token")
+            return
+
+    raise RuntimeError(
+        "No HF token found. Please set it up (one-time):\n"
+        "  - Local: export HF_TOKEN='hf_...' in ~/.zshrc\n"
+        "  - Colab: Run this in a cell BEFORE your script:\n"
+        "      from google.colab import userdata; import os\n"
+        '      os.environ["HF_TOKEN"] = userdata.get("HF_TOKEN")\n'
+        "  - Or run: huggingface-cli login --token hf_..."
+    )

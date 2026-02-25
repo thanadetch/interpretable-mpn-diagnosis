@@ -21,9 +21,13 @@ Usage:
 
 import argparse
 import re
+import sys
 from collections import defaultdict
 from pathlib import Path
 from typing import Dict, List, Tuple
+
+# Ensure src/ is on sys.path when running directly (e.g., python src/tools/extract_uni2.py)
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import timm
 import torch
@@ -33,7 +37,7 @@ from timm.data.transforms_factory import create_transform
 from timm.layers import SwiGLUPacked
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
-from huggingface_hub import login
+from core.config import hf_login
 
 # =============================================================================
 # Constants
@@ -247,7 +251,7 @@ def run_extraction(args: argparse.Namespace) -> None:
     # Load UNI2-h
     # ------------------------------------------------------------------
     print("\nLoading UNI2-h...")
-    login()
+    hf_login()
     timm_kwargs = {
         "img_size": 224,
         "patch_size": 14,
