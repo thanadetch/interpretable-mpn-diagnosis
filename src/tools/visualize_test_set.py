@@ -152,6 +152,13 @@ Examples:
         default=8,
         help="Number of columns in the grid (default: 8).",
     )
+    parser.add_argument(
+        "--subtype",
+        type=str,
+        default=None,
+        choices=["ET", "PV", "PMF"],
+        help="Specific subtype to visualize. If not provided, visualizes all subtypes.",
+    )
 
     # Auto-detect device
     if torch.cuda.is_available():
@@ -203,6 +210,15 @@ def main() -> None:
     max_patches = ckpt_args.get("max_patches", None)
     dataset = MPNBagDatasetFull(features_dir, max_patches=max_patches)
     patients = get_test_patients(dataset, test_idx)
+
+    # Filter by subtype if specified
+    if args.subtype is not None:
+        patients = {
+            pid: info
+            for pid, info in patients.items()
+            if info["class_name"] == args.subtype
+        }
+        print(f"\n  Filtering to subtype: {args.subtype}")
 
     # Count per-class
     class_counts: Dict[str, int] = defaultdict(int)
