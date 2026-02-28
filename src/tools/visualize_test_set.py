@@ -153,6 +153,12 @@ Examples:
         help="Number of columns in the grid (default: 8).",
     )
     parser.add_argument(
+        "--postfix",
+        type=str,
+        default="",
+        help="Optional string to append to the output directory name (e.g., 'run2' or 'filtered').",
+    )
+    parser.add_argument(
         "--subtype",
         type=str,
         default=None,
@@ -245,7 +251,8 @@ def main() -> None:
     if args.output_dir:
         output_root = Path(args.output_dir)
     else:
-        output_root = RESULTS_DIR / "test_set_heatmaps" / exp_name
+        folder_name = f"{exp_name}_{args.postfix}" if args.postfix else exp_name
+        output_root = RESULTS_DIR / "test_set_heatmaps" / folder_name
 
     print(f"  Output: {output_root}")
     print("=" * 60)

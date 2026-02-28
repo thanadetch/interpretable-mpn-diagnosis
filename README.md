@@ -59,6 +59,8 @@
 `python src/data/preprocess.py --stain reti --patch_size 224 --step_size 112 --output_dir data/processed_grading`
 `python src/data/preprocess.py --stain he --patch_size 512 --step_size 256 --output_dir data/processed_subtype`
 `python src/data/preprocess.py --stain he --patch_size 224 --step_size 112 --output_dir data/processed_subtype`
+`python src/data/preprocess.py --stain he --patch_size 224 --step_size 112 --output_dir data/processed_subtype --crop_top 57 --crop_bottom 40 --use_od_filter --save_rejected`
+`python src/data/preprocess.py --stain he --patch_size 224 --step_size 112 --output_dir data/processed_subtype --crop_top 57 --crop_bottom 40 --use_od_filter --save_rejected --tissue_threshold 0.12 --min_tissue_ratio 0.3`
 
 `python src/janitor/run_janitor.py --task grading --model_path experiments/janitor_grading_20260202_143052/janitor_model_grading.pth`
 
@@ -93,3 +95,7 @@
 
 `python src/tools/visualize_test_set.py \
     --mil_checkpoint experiments/simple_mil_titan_20260218_042451/best_simple_titan.pth`
+
+`python src/tools/visualize_test_set.py \
+    --mil_checkpoint experiments/simple_virchow_20260228_141807/best_simple_virchow.pth \
+    --postfix crop_od`

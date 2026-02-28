@@ -251,6 +251,12 @@ def load_backbone(
         # timm Attention.forward: attn = softmax(q @ k^T); attn = attn_drop(attn)
         # Hooking attn_drop captures the post-softmax attention matrix.
         attn_module = _find_last_attn_module_timm(model)
+
+        # Disable fused/SDPA attention so the manual path through attn_drop
+        # is used — otherwise F.scaled_dot_product_attention bypasses the hook.
+        if hasattr(attn_module, "fused_attn"):
+            attn_module.fused_attn = False
+
         hook = AttentionHook()
         if hasattr(attn_module, "attn_drop"):
             attn_module.attn_drop.register_forward_hook(hook.hook_attn_weights)

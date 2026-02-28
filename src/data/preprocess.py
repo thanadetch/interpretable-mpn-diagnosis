@@ -1,19 +1,24 @@
 """
 Preprocessing script for MPN bone marrow images.
-Performs Sliding Window Patching to preserve high-resolution details.
+Performs Sliding Window Patching with Edge-Anchored Tiling.
 
-Images are padded with black pixels to ensure no part of the original
-image is discarded during patching.
+Instead of padding with black pixels, the last patch in each row/column
+is snapped to the image edge so that every pixel is covered without
+introducing artificial black borders.
 
 Usage:
     python src/preprocess.py
     python src/preprocess.py --patch_size 512 --step_size 256
+    python src/preprocess.py --crop_top 50 --crop_bottom 50
+    python src/preprocess.py --use_od_filter --save_rejected
 """
 
 import argparse
 import sys
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Optional, Set, Tuple
+
+import numpy as np
 
 from PIL import Image
 from tqdm import tqdm
@@ -66,129 +71,147 @@ def parse_args() -> argparse.Namespace:
         help="Filter by stain type: 'reti' (grading), 'he' (classification), or 'all'",
     )
 
+    parser.add_argument(
+        "--crop_top",
+        type=int,
+        default=0,
+        help="Number of pixels to crop from the top of each image (default: 0)",
+    )
+
+    parser.add_argument(
+        "--crop_bottom",
+        type=int,
+        default=0,
+        help="Number of pixels to crop from the bottom of each image (default: 0)",
+    )
+
+    parser.add_argument(
+        "--use_od_filter",
+        action="store_true",
+        help="Enable OD-based background filtering",
+    )
+
+    parser.add_argument(
+        "--tissue_threshold",
+        type=float,
+        default=0.15,
+        help="OD threshold to consider a pixel as tissue (default: 0.15)",
+    )
+
+    parser.add_argument(
+        "--min_tissue_ratio",
+        type=float,
+        default=0.3,
+        help="Minimum fraction of tissue pixels to keep a patch (default: 0.3)",
+    )
+
+    parser.add_argument(
+        "--save_rejected",
+        action="store_true",
+        help="Save rejected background patches",
+    )
+
     return parser.parse_args()
 
 
-def calculate_padded_size(
-    original_size: int,
-    patch_size: int,
-    step_size: int,
-) -> int:
+def is_tissue(
+    patch: Image.Image,
+    threshold: float,
+    min_ratio: float,
+) -> bool:
     """
-    Calculate the padded size needed to ensure full coverage with sliding window.
-
-    The padded size ensures that the last patch captures the very last pixels
-    of the original image (no pixels are discarded).
+    Determine whether a patch contains sufficient tissue using Optical Density.
 
     Args:
-        original_size: Original dimension (width or height)
-        patch_size: Size of each patch
-        step_size: Step size for sliding window
+        patch: PIL Image patch
+        threshold: OD value above which a pixel is considered tissue
+        min_ratio: Minimum fraction of tissue pixels required
 
     Returns:
-        Padded size that allows complete coverage
+        True if the patch is tissue, False if background
     """
-    if original_size <= patch_size:
-        # Image is smaller than patch, just need patch_size
-        return patch_size
-
-    # Calculate how many full steps we can take from position 0
-    # The last patch starts at position: start_pos, and ends at: start_pos + patch_size
-    # We need: start_pos + patch_size >= original_size for full coverage
-
-    # Number of steps needed (ceiling division)
-    # After n steps, last patch starts at n * step_size
-    # We need: n * step_size + patch_size >= original_size
-    # So: n >= (original_size - patch_size) / step_size
-    # n = ceil((original_size - patch_size) / step_size)
-
-    if original_size <= patch_size:
-        num_steps = 0
-    else:
-        num_steps = -(-(original_size - patch_size) // step_size)  # Ceiling division
-
-    # The padded size should allow exactly num_steps + 1 patches
-    # Last patch starts at: num_steps * step_size
-    # Last patch ends at: num_steps * step_size + patch_size
-    padded_size = num_steps * step_size + patch_size
-
-    return padded_size
-
-
-def pad_image_for_patching(
-    image: Image.Image,
-    patch_size: int,
-    step_size: int,
-) -> Image.Image:
-    """
-    Pad image with black pixels to ensure complete coverage during patching.
-
-    The sliding window will capture every pixel of the original image.
-    Padding is added to the right and bottom edges as needed.
-
-    Args:
-        image: PIL Image to pad
-        patch_size: Size of each patch
-        step_size: Step size for sliding window
-
-    Returns:
-        Padded PIL Image (or original if no padding needed)
-    """
-    width, height = image.size
-
-    # Calculate required padded dimensions
-    new_width = calculate_padded_size(width, patch_size, step_size)
-    new_height = calculate_padded_size(height, patch_size, step_size)
-
-    # Check if padding is needed
-    if new_width == width and new_height == height:
-        return image
-
-    # Create new image with black background (0, 0, 0)
-    padded = Image.new("RGB", (new_width, new_height), (0, 0, 0))
-
-    # Paste original image at top-left corner
-    padded.paste(image, (0, 0))
-
-    return padded
+    img_array = np.array(patch, dtype=float)
+    od = -np.log10((img_array + 1) / 255.0)
+    mean_od = od.mean(axis=2)  # Average across RGB channels
+    tissue_fraction = (mean_od > threshold).mean()
+    return tissue_fraction >= min_ratio
 
 
 def extract_patches(
     image: Image.Image,
     patch_size: int,
     step_size: int,
-) -> List[Tuple[Image.Image, int, int]]:
+    use_od_filter: bool = False,
+    tissue_threshold: float = 0.15,
+    min_tissue_ratio: float = 0.3,
+) -> Tuple[List[Tuple[Image.Image, int, int]], List[Tuple[Image.Image, int, int]]]:
     """
-    Extract overlapping patches from an image using sliding window.
+    Extract patches using Edge-Anchored Tiling with optional OD filtering.
+
+    Iterates through the image with *step_size*.  When the next regular
+    step would exceed the image boundary, the last patch is snapped to
+    align exactly with the right / bottom edge.  A set of seen origins
+    prevents duplicate patches when dimensions are an exact multiple of
+    the step size.
 
     Args:
         image: PIL Image to extract patches from
         patch_size: Size of each patch (patch_size x patch_size)
         step_size: Step size for sliding window
+        use_od_filter: Whether to apply OD-based tissue filtering
+        tissue_threshold: OD threshold for tissue detection
+        min_tissue_ratio: Minimum tissue fraction to accept a patch
 
     Returns:
-        List of tuples: (patch_image, row_idx, col_idx)
+        Tuple of (valid_patches, rejected_patches),
+        each a list of (patch_image, row_idx, col_idx)
     """
     width, height = image.size
-    patches: List[Tuple[Image.Image, int, int]] = []
+    valid_patches: List[Tuple[Image.Image, int, int]] = []
+    rejected_patches: List[Tuple[Image.Image, int, int]] = []
+    seen: Set[Tuple[int, int]] = set()
 
-    row_idx = 0
+    # Collect y-positions (edge-anchored)
+    y_positions: List[int] = []
     y = 0
     while y + patch_size <= height:
-        col_idx = 0
-        x = 0
-        while x + patch_size <= width:
-            # Extract patch
-            patch = image.crop((x, y, x + patch_size, y + patch_size))
-            patches.append((patch, row_idx, col_idx))
-
-            x += step_size
-            col_idx += 1
-
+        y_positions.append(y)
         y += step_size
-        row_idx += 1
+    # Snap last row to bottom edge if not already covered
+    last_y = height - patch_size
+    if last_y >= 0 and (not y_positions or y_positions[-1] != last_y):
+        y_positions.append(last_y)
 
-    return patches
+    # Collect x-positions (edge-anchored)
+    x_positions: List[int] = []
+    x = 0
+    while x + patch_size <= width:
+        x_positions.append(x)
+        x += step_size
+    # Snap last column to right edge if not already covered
+    last_x = width - patch_size
+    if last_x >= 0 and (not x_positions or x_positions[-1] != last_x):
+        x_positions.append(last_x)
+
+    for row_idx, py in enumerate(y_positions):
+        for col_idx, px in enumerate(x_positions):
+            if (px, py) in seen:
+                continue
+            seen.add((px, py))
+            patch = image.crop((px, py, px + patch_size, py + patch_size))
+
+            is_valid = (
+                is_tissue(patch, tissue_threshold, min_tissue_ratio)
+                if use_od_filter
+                else True
+            )
+
+            if is_valid:
+                valid_patches.append((patch, row_idx, col_idx))
+            else:
+                rejected_patches.append((patch, row_idx, col_idx))
+
+    return valid_patches, rejected_patches
 
 
 def process_image(
@@ -196,21 +219,33 @@ def process_image(
     output_dir: Path,
     patch_size: int,
     step_size: int,
+    crop_top: int = 0,
+    crop_bottom: int = 0,
+    use_od_filter: bool = False,
+    tissue_threshold: float = 0.15,
+    min_tissue_ratio: float = 0.3,
+    save_rejected: bool = False,
+    rejected_dir: Optional[Path] = None,
 ) -> int:
     """
-    Process a single image: pad if needed, extract patches, and save them.
-
-    Images are padded with black pixels to ensure no part of the original
-    image is discarded during patching.
+    Process a single image: optionally crop, extract patches via
+    edge-anchored tiling with optional OD filtering, and save them.
 
     Args:
         image_path: Path to input image
-        output_dir: Directory to save patches
+        output_dir: Directory to save valid patches
         patch_size: Size of each patch
         step_size: Step size for sliding window
+        crop_top: Pixels to remove from the top edge
+        crop_bottom: Pixels to remove from the bottom edge
+        use_od_filter: Whether to apply OD-based tissue filtering
+        tissue_threshold: OD threshold for tissue detection
+        min_tissue_ratio: Minimum tissue fraction to accept a patch
+        save_rejected: Whether to save rejected background patches
+        rejected_dir: Directory to save rejected patches
 
     Returns:
-        Number of patches extracted
+        Number of valid patches extracted
     """
     # Load image
     try:
@@ -221,35 +256,42 @@ def process_image(
 
     original_width, original_height = image.size
 
-    # Pad image to ensure complete coverage (no pixels discarded)
-    image = pad_image_for_patching(image, patch_size, step_size)
-    padded_width, padded_height = image.size
+    # Optional cropping
+    if crop_top > 0 or crop_bottom > 0:
+        image = image.crop((0, crop_top, original_width, original_height - crop_bottom))
 
-    # Log if padding was applied
-    if padded_width != original_width or padded_height != original_height:
-        pass  # Padding applied silently; can add logging if needed
+    # Extract patches using edge-anchored tiling
+    valid_patches, rejected_patches = extract_patches(
+        image,
+        patch_size,
+        step_size,
+        use_od_filter=use_od_filter,
+        tissue_threshold=tissue_threshold,
+        min_tissue_ratio=min_tissue_ratio,
+    )
 
-    # Extract patches
-    patches = extract_patches(image, patch_size, step_size)
-
-    if len(patches) == 0:
-        print(f"Warning: No patches extracted from {image_path}")
+    if len(valid_patches) == 0:
+        print(f"Warning: No valid patches extracted from {image_path}")
         return 0
 
-    # Create output directory
+    # Create output directory and save valid patches
     output_dir.mkdir(parents=True, exist_ok=True)
+    original_stem = image_path.stem
 
-    # Save patches
-    original_stem = image_path.stem  # Filename without extension
-
-    for patch, row_idx, col_idx in patches:
-        patch_idx = row_idx * 100 + col_idx  # Unique index for each patch
+    for patch, row_idx, col_idx in valid_patches:
         patch_name = f"{original_stem}_r{row_idx}c{col_idx}.png"
         patch_path = output_dir / patch_name
-
         patch.save(patch_path, "PNG")
 
-    return len(patches)
+    # Save rejected patches if requested
+    if save_rejected and rejected_dir is not None and len(rejected_patches) > 0:
+        rejected_dir.mkdir(parents=True, exist_ok=True)
+        for patch, row_idx, col_idx in rejected_patches:
+            patch_name = f"{original_stem}_r{row_idx}c{col_idx}_rejected.png"
+            patch_path = rejected_dir / patch_name
+            patch.save(patch_path, "PNG")
+
+    return len(valid_patches)
 
 
 def process_dataset(
@@ -258,6 +300,12 @@ def process_dataset(
     patch_size: int,
     step_size: int,
     stain: str = "all",
+    crop_top: int = 0,
+    crop_bottom: int = 0,
+    use_od_filter: bool = False,
+    tissue_threshold: float = 0.15,
+    min_tissue_ratio: float = 0.3,
+    save_rejected: bool = False,
 ) -> dict:
     """
     Process entire dataset: extract patches from all images.
@@ -266,13 +314,19 @@ def process_dataset(
         Input:  data/raw/{Class}/{PatientID}/{ImageFile}.tif
         Output: data/processed/{Class}/{PatientID}/{ImageFile}_r{row}c{col}.png
 
-    All images are processed with padding to ensure complete coverage.
+    All images are processed with edge-anchored tiling for complete coverage.
 
     Args:
         input_dir: Input directory (data/raw)
         output_dir: Output directory (data/processed)
         patch_size: Size of each patch
         step_size: Step size for sliding window
+        crop_top: Pixels to remove from the top edge
+        crop_bottom: Pixels to remove from the bottom edge
+        use_od_filter: Whether to apply OD-based tissue filtering
+        tissue_threshold: OD threshold for tissue detection
+        min_tissue_ratio: Minimum tissue fraction to accept a patch
+        save_rejected: Whether to save rejected background patches
 
     Returns:
         Statistics dictionary
@@ -300,7 +354,14 @@ def process_dataset(
     print(
         f"Step size:        {step_size} ({100 * (patch_size - step_size) / patch_size:.0f}% overlap)"
     )
-    print(f"Padding:          Black pixels (0,0,0) for complete coverage")
+    print(f"Tiling:           Edge-anchored (no black padding)")
+    print(f"Crop top:         {crop_top}px")
+    print(f"Crop bottom:      {crop_bottom}px")
+    print(f"OD filter:        {'ON' if use_od_filter else 'OFF'}")
+    if use_od_filter:
+        print(f"  Tissue thresh:  {tissue_threshold}")
+        print(f"  Min ratio:      {min_tissue_ratio}")
+    print(f"Save rejected:    {'YES' if save_rejected else 'NO'}")
     print(f"Stain filter:     {stain}")
     print(f"{'=' * 60}\n")
 
@@ -360,12 +421,30 @@ def process_dataset(
                 relative_path = image_path.relative_to(input_dir)
                 patient_output_dir = output_dir / relative_path.parent
 
+                # Determine task-specific rejected directory
+                rejected_dir: Optional[Path] = None
+                if save_rejected:
+                    is_reti = "reti" in image_path.name.lower()
+                    task_name = "grading" if is_reti else "subtype"
+                    rejected_dir = (
+                        output_dir.parent
+                        / f"{task_name}_rejected_patches"
+                        / relative_path.parent
+                    )
+
                 # Process image and extract patches
                 num_patches = process_image(
                     image_path=image_path,
                     output_dir=patient_output_dir,
                     patch_size=patch_size,
                     step_size=step_size,
+                    crop_top=crop_top,
+                    crop_bottom=crop_bottom,
+                    use_od_filter=use_od_filter,
+                    tissue_threshold=tissue_threshold,
+                    min_tissue_ratio=min_tissue_ratio,
+                    save_rejected=save_rejected,
+                    rejected_dir=rejected_dir,
                 )
 
                 if num_patches == 0:
@@ -425,6 +504,12 @@ def main() -> None:
         patch_size=args.patch_size,
         step_size=args.step_size,
         stain=args.stain,
+        crop_top=args.crop_top,
+        crop_bottom=args.crop_bottom,
+        use_od_filter=args.use_od_filter,
+        tissue_threshold=args.tissue_threshold,
+        min_tissue_ratio=args.min_tissue_ratio,
+        save_rejected=args.save_rejected,
     )
 
     # Print statistics
