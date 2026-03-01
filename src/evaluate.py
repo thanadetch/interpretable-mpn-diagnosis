@@ -24,7 +24,6 @@ from sklearn.metrics import (
     classification_report,
     confusion_matrix,
     f1_score,
-    fbeta_score,
     precision_score,
     recall_score,
 )
@@ -310,12 +309,6 @@ def compute_metrics(
         "f1_weighted": f1_score(
             y_true, y_pred, average="weighted", labels=labels, zero_division=0
         ),
-        "f2_macro": fbeta_score(
-            y_true, y_pred, beta=2, average="macro", labels=labels, zero_division=0
-        ),
-        "f2_weighted": fbeta_score(
-            y_true, y_pred, beta=2, average="weighted", labels=labels, zero_division=0
-        ),
         "precision_macro": precision_score(
             y_true, y_pred, average="macro", labels=labels, zero_division=0
         ),
@@ -380,7 +373,7 @@ def plot_per_class_metrics(
     title: str = "Per-Class Performance Metrics",
 ) -> None:
     """
-    Plot grouped bar chart showing Precision, Recall, F1-Score, and F2-Score for each class.
+    Plot grouped bar chart showing Precision, Recall, and F1-Score for each class.
 
     Args:
         report: Dictionary from sklearn's classification_report (output_dict=True)
@@ -388,7 +381,6 @@ def plot_per_class_metrics(
         title: Plot title
     """
     import pandas as pd
-    from sklearn.metrics import fbeta_score
 
     sns.set_theme(style="whitegrid")
 
@@ -398,19 +390,8 @@ def plot_per_class_metrics(
 
     for class_name, metrics in report.items():
         if class_name not in summary_keys and isinstance(metrics, dict):
-            # Calculate F2-Score per class from precision and recall
             precision = metrics.get("precision", 0)
             recall = metrics.get("recall", 0)
-            # F2 = (1 + beta^2) * (precision * recall) / (beta^2 * precision + recall)
-            beta = 2
-            if precision + recall > 0:
-                f2_score = (
-                    (1 + beta**2)
-                    * (precision * recall)
-                    / (beta**2 * precision + recall)
-                )
-            else:
-                f2_score = 0.0
 
             class_data.append(
                 {
@@ -418,7 +399,6 @@ def plot_per_class_metrics(
                     "Precision": precision,
                     "Recall": recall,
                     "F1-Score": metrics.get("f1-score", 0),
-                    "F2-Score": f2_score,
                 }
             )
 
@@ -431,7 +411,7 @@ def plot_per_class_metrics(
     df_long = pd.melt(
         df,
         id_vars=["Class"],
-        value_vars=["Precision", "Recall", "F1-Score", "F2-Score"],
+        value_vars=["Precision", "Recall", "F1-Score"],
         var_name="Metric",
         value_name="Score",
     )
@@ -462,10 +442,10 @@ def plot_overall_metrics(
     title: str = "Overall Performance Metrics",
 ) -> None:
     """
-    Plot bar chart showing overall performance metrics (Accuracy, Precision, Recall, F1, F2).
+    Plot bar chart showing overall performance metrics (Accuracy, Precision, Recall, F1).
 
     Args:
-        metrics: Dictionary containing 'accuracy', 'precision_macro', 'recall_macro', 'f1_macro', 'f2_macro'
+        metrics: Dictionary containing 'accuracy', 'precision_macro', 'recall_macro', 'f1_macro'
         save_path: Path to save figure
         title: Plot title
     """
@@ -473,13 +453,12 @@ def plot_overall_metrics(
 
     sns.set_theme(style="whitegrid")
 
-    # Extract overall metrics (including F2-Score)
+    # Extract overall metrics
     overall_data = {
         "Accuracy": metrics.get("accuracy", 0),
         "Precision (Macro)": metrics.get("precision_macro", 0),
         "Recall (Macro)": metrics.get("recall_macro", 0),
         "F1-Score (Macro)": metrics.get("f1_macro", 0),
-        "F2-Score (Macro)": metrics.get("f2_macro", 0),
     }
 
     # Create DataFrame
@@ -536,8 +515,12 @@ def evaluate(args: argparse.Namespace) -> Dict:
 
     print(f"Loaded checkpoint: {checkpoint_path}")
     print(f"Task: {task}, Model: {model_name}")
-    # Handle both old (val_acc only) and new (val_f2) checkpoint formats
-    if "val_f2" in checkpoint:
+    # Handle both old (val_acc only) and new (val_macro_recall) checkpoint formats
+    if "val_macro_recall" in checkpoint:
+        print(
+            f"Checkpoint epoch: {checkpoint['epoch']}, Val Macro Recall: {checkpoint['val_macro_recall']:.4f}, Val Acc: {checkpoint['val_acc']:.2f}%"
+        )
+    elif "val_f2" in checkpoint:
         print(
             f"Checkpoint epoch: {checkpoint['epoch']}, Val F2: {checkpoint['val_f2']:.4f}, Val Acc: {checkpoint['val_acc']:.2f}%"
         )
@@ -617,10 +600,9 @@ def evaluate(args: argparse.Namespace) -> Dict:
     print(f"Evaluation Results ({level}-level)")
     print(f"{'=' * 60}")
     print(f"Accuracy:        {metrics['accuracy']:.4f}")
-    print(f"Macro F2-Score:  {metrics['f2_macro']:.4f}  <-- Primary Metric")
+    print(f"Macro Recall:    {metrics['recall_macro']:.4f}  <-- Primary Metric")
     print(f"Macro F1-Score:  {metrics['f1_macro']:.4f}")
     print(f"Macro Precision: {metrics['precision_macro']:.4f}")
-    print(f"Macro Recall:    {metrics['recall_macro']:.4f}")
     print(f"{'=' * 60}\n")
 
     # Extract experiment name from checkpoint path
