@@ -61,6 +61,7 @@
 `python src/data/preprocess.py --stain he --patch_size 224 --step_size 112 --output_dir data/processed_subtype`
 `python src/data/preprocess.py --stain he --patch_size 224 --step_size 112 --output_dir data/processed_subtype --crop_top 57 --crop_bottom 40 --use_od_filter --save_rejected`
 `python src/data/preprocess.py --stain he --patch_size 224 --step_size 112 --output_dir data/processed_subtype --crop_top 57 --crop_bottom 40 --use_od_filter --save_rejected --tissue_threshold 0.12 --min_tissue_ratio 0.3`
+`python src/data/preprocess.py --stain he --patch_size 224 --step_size 112 --output_dir data/processed_subtype --crop_top 57 --crop_bottom 40 --use_od_filter --save_rejected --tissue_threshold 0.05 --min_tissue_ratio 0.12 --min_specimen_fraction 0.15`
 
 `python src/janitor/run_janitor.py --task grading --model_path experiments/janitor_grading_20260202_143052/janitor_model_grading.pth`
 

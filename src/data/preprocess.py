@@ -19,6 +19,8 @@ from pathlib import Path
 from typing import List, Optional, Set, Tuple
 
 import numpy as np
+from skimage.color import rgb2hsv
+from skimage.morphology import flood
 
 from PIL import Image
 from tqdm import tqdm
@@ -111,30 +113,80 @@ def parse_args() -> argparse.Namespace:
         help="Save rejected background patches",
     )
 
+    parser.add_argument(
+        "--min_specimen_fraction",
+        type=float,
+        default=0.12,
+        help="Minimum fraction of specimen (non-glass) pixels to keep a patch (default: 0.12)",
+    )
+
     return parser.parse_args()
 
 
+def compute_specimen_mask(img_array_uint8):
+    """
+    Creates a mask to remove outside glass background using Adaptive HSV.
+    """
+    img = img_array_uint8.astype(np.float32)
+    h, w, _ = img.shape
+    corners = [(0, 0), (0, w - 1), (h - 1, 0), (h - 1, w - 1)]
+
+    hsv = rgb2hsv(img / 255.0)
+    S = hsv[..., 1]
+    V = hsv[..., 2]
+
+    # Border stats
+    border_S = np.concatenate([S[0, :], S[-1, :], S[:, 0], S[:, -1]])
+    border_V = np.concatenate([V[0, :], V[-1, :], V[:, 0], V[:, -1]])
+
+    # Adaptive Thresholds (Hardcoded percentiles)
+    V_thr = np.percentile(border_V, 95)
+    S_thr = np.percentile(border_S, 5)
+
+    # Failsafe Clamp (crucial to protect 100% tissue patches)
+    V_thr = max(V_thr, 0.60)
+    S_thr = min(S_thr, 0.40)
+
+    # Flood-fill on brightness map
+    gray = np.clip(V * 255.0, 0, 255).astype(np.uint8)
+    tolerance = 20
+
+    outside = np.zeros((h, w), dtype=bool)
+    for r, c in corners:
+        if (V[r, c] >= V_thr) and (S[r, c] <= S_thr):
+            outside |= flood(gray, (r, c), tolerance=tolerance)
+
+    specimen_mask = ~outside
+    return specimen_mask
+
+
 def is_tissue(
-    patch: Image.Image,
+    patch,
     threshold: float,
     min_ratio: float,
+    min_specimen_fraction: float = 0.12,
 ) -> bool:
     """
-    Determine whether a patch contains sufficient tissue using Optical Density.
-
-    Args:
-        patch: PIL Image patch
-        threshold: OD value above which a pixel is considered tissue
-        min_ratio: Minimum fraction of tissue pixels required
-
-    Returns:
-        True if the patch is tissue, False if background
+    2-Stage Tissue Filter.
     """
-    img_array = np.array(patch, dtype=float)
-    od = -np.log10((img_array + 1) / 255.0)
-    mean_od = od.mean(axis=2)  # Average across RGB channels
-    tissue_fraction = (mean_od > threshold).mean()
-    return tissue_fraction >= min_ratio
+    img_array = np.asarray(patch)
+
+    # Stage 1: Specimen Mask
+    specimen_mask = compute_specimen_mask(img_array)
+    specimen_fraction = specimen_mask.mean()
+
+    if specimen_fraction < min_specimen_fraction:
+        return False
+
+    # Stage 2: OD filter inside specimen with safe clipping
+    od = -np.log10(np.clip(img_array.astype(np.float32), 1.0, 255.0) / 255.0)
+    tissue_mask = od.mean(axis=2) > threshold
+
+    tissue_ratio_in_spec = (tissue_mask & specimen_mask).sum() / (
+        specimen_mask.sum() + 1e-6
+    )
+
+    return tissue_ratio_in_spec >= min_ratio
 
 
 def extract_patches(
@@ -144,6 +196,7 @@ def extract_patches(
     use_od_filter: bool = False,
     tissue_threshold: float = 0.15,
     min_tissue_ratio: float = 0.3,
+    min_specimen_fraction: float = 0.12,
 ) -> Tuple[List[Tuple[Image.Image, int, int]], List[Tuple[Image.Image, int, int]]]:
     """
     Extract patches using Edge-Anchored Tiling with optional OD filtering.
@@ -161,6 +214,7 @@ def extract_patches(
         use_od_filter: Whether to apply OD-based tissue filtering
         tissue_threshold: OD threshold for tissue detection
         min_tissue_ratio: Minimum tissue fraction to accept a patch
+        min_specimen_fraction: Minimum specimen fraction to accept a patch
 
     Returns:
         Tuple of (valid_patches, rejected_patches),
@@ -201,7 +255,9 @@ def extract_patches(
             patch = image.crop((px, py, px + patch_size, py + patch_size))
 
             is_valid = (
-                is_tissue(patch, tissue_threshold, min_tissue_ratio)
+                is_tissue(
+                    patch, tissue_threshold, min_tissue_ratio, min_specimen_fraction
+                )
                 if use_od_filter
                 else True
             )
@@ -224,6 +280,7 @@ def process_image(
     use_od_filter: bool = False,
     tissue_threshold: float = 0.15,
     min_tissue_ratio: float = 0.3,
+    min_specimen_fraction: float = 0.12,
     save_rejected: bool = False,
     rejected_dir: Optional[Path] = None,
 ) -> int:
@@ -241,6 +298,7 @@ def process_image(
         use_od_filter: Whether to apply OD-based tissue filtering
         tissue_threshold: OD threshold for tissue detection
         min_tissue_ratio: Minimum tissue fraction to accept a patch
+        min_specimen_fraction: Minimum specimen fraction to accept a patch
         save_rejected: Whether to save rejected background patches
         rejected_dir: Directory to save rejected patches
 
@@ -268,6 +326,7 @@ def process_image(
         use_od_filter=use_od_filter,
         tissue_threshold=tissue_threshold,
         min_tissue_ratio=min_tissue_ratio,
+        min_specimen_fraction=min_specimen_fraction,
     )
 
     if len(valid_patches) == 0:
@@ -305,6 +364,7 @@ def process_dataset(
     use_od_filter: bool = False,
     tissue_threshold: float = 0.15,
     min_tissue_ratio: float = 0.3,
+    min_specimen_fraction: float = 0.12,
     save_rejected: bool = False,
 ) -> dict:
     """
@@ -326,6 +386,7 @@ def process_dataset(
         use_od_filter: Whether to apply OD-based tissue filtering
         tissue_threshold: OD threshold for tissue detection
         min_tissue_ratio: Minimum tissue fraction to accept a patch
+        min_specimen_fraction: Minimum specimen fraction to accept a patch
         save_rejected: Whether to save rejected background patches
 
     Returns:
@@ -361,6 +422,7 @@ def process_dataset(
     if use_od_filter:
         print(f"  Tissue thresh:  {tissue_threshold}")
         print(f"  Min ratio:      {min_tissue_ratio}")
+        print(f"  Min specimen:   {min_specimen_fraction}")
     print(f"Save rejected:    {'YES' if save_rejected else 'NO'}")
     print(f"Stain filter:     {stain}")
     print(f"{'=' * 60}\n")
@@ -443,6 +505,7 @@ def process_dataset(
                     use_od_filter=use_od_filter,
                     tissue_threshold=tissue_threshold,
                     min_tissue_ratio=min_tissue_ratio,
+                    min_specimen_fraction=min_specimen_fraction,
                     save_rejected=save_rejected,
                     rejected_dir=rejected_dir,
                 )
@@ -509,6 +572,7 @@ def main() -> None:
         use_od_filter=args.use_od_filter,
         tissue_threshold=args.tissue_threshold,
         min_tissue_ratio=args.min_tissue_ratio,
+        min_specimen_fraction=args.min_specimen_fraction,
         save_rejected=args.save_rejected,
     )
 
