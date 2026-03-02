@@ -52,7 +52,7 @@ BACKBONE_CONFIG: Dict[str, Dict] = {
         "feature_dir": "features_uni2",
         "display_name": "UNI2-h",
     },
-    "virchow": {
+    "virchow2": {
         "dim": 1280,
         "feature_dir": "features_virchow2",
         "display_name": "Virchow2",
@@ -208,7 +208,7 @@ def load_backbone(
 
         return model, eval_transform, get_attention
 
-    elif backbone_name in ("uni2", "virchow"):
+    elif backbone_name in ("uni2", "virchow2"):
         import timm
         from timm.data import resolve_data_config
         from timm.data.transforms_factory import create_transform
@@ -233,7 +233,7 @@ def load_backbone(
             model = timm.create_model(
                 "hf-hub:MahmoodLab/UNI2-h", pretrained=True, **timm_kwargs
             )
-        else:  # virchow
+        else:  # virchow2
             model = timm.create_model(
                 "hf-hub:paige-ai/Virchow2",
                 pretrained=True,
@@ -314,7 +314,7 @@ def load_mil_model(
     Returns:
         model: Loaded MIL model in eval mode.
         model_type: 'simple' or 'hybrid'.
-        backbone_name: 'titan', 'uni2', or 'virchow'.
+        backbone_name: 'titan', 'uni2', or 'virchow2'.
     """
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=True)
     args = checkpoint["args"]

@@ -97,5 +97,11 @@
     --mil_checkpoint experiments/simple_mil_titan_20260218_042451/best_simple_titan.pth`
 
 `python src/tools/visualize_test_set.py \
-    --mil_checkpoint experiments/simple_virchow_20260228_141807/best_simple_virchow.pth \
+    --mil_checkpoint experiments/simple_virchow2_20260301_144010/best_simple_virchow2.pth \
     --postfix crop_od`
+
+
+`python src/tools/analyze_shortcuts.py \
+        --mil_checkpoint experiments/simple_virchow2_20260301_160636/best_simple_virchow2.pth \
+        --patches_dir data/processed_subtype \
+        --split val`

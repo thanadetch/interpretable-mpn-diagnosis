@@ -55,7 +55,7 @@ BACKBONE_CONFIG: Dict[str, Dict] = {
         "feature_dir": "features_uni2",
         "display_name": "UNI2-h",
     },
-    "virchow": {
+    "virchow2": {
         "dim": 1280,
         "feature_dir": "features_virchow2",
         "display_name": "Virchow2",
@@ -686,6 +686,8 @@ def main() -> None:
                 "val_macro_recall": val_macro_recall,
                 "val_acc": val_acc,
                 "val_loss": val_loss,
+                "train_idx": train_idx,
+                "val_idx": val_idx,
                 "test_idx": test_idx,
                 "backbone": args.backbone,
                 "model_type": args.model_type,

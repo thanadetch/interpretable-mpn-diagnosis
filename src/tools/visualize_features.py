@@ -7,7 +7,7 @@ scatter colour-coded by MPN subtype.
 Usage:
     python -m src.tools.visualize_features --backbone titan
     python -m src.tools.visualize_features --backbone uni2 --data_root data
-    python -m src.tools.visualize_features --backbone virchow --output my_plot.png
+    python -m src.tools.visualize_features --backbone virchow2 --output my_plot.png
 """
 
 import argparse
@@ -35,7 +35,7 @@ BACKBONE_CONFIG = {
         "feature_dir": "features_uni2",
         "display_name": "UNI2-h",
     },
-    "virchow": {
+    "virchow2": {
         "feature_dir": "features_virchow2",
         "display_name": "Virchow2",
     },
