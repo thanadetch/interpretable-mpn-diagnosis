@@ -62,7 +62,7 @@ def tissue_fraction_from_rgb(
     mean_od = od.mean(axis=2)  # (H,W)
     tissue_mask = mean_od > tissue_thr
     return float(tissue_mask.mean())
-analyze_shortcuts
+
 
 def space_bg_fractions_from_rgb(
     patch_rgb_uint8: np.ndarray,
