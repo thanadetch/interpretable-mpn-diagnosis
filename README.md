@@ -88,17 +88,13 @@
 
 `python src/tools/visualize_features.py --backbone titan`
 
-`python src/visualize_heatmap.py \
-    --mil_checkpoint experiments/simple_mil_titan_20260218_042451/best_simple_titan.pth \
-    --patient_dir "data/processed_subtype/PMF/PMF4 G2" \
-    --image_id 1`
+`python -m src.tools.visualize_heatmap_set \
+    --mil_checkpoint experiments/simple_virchow2_20260301_160636/best_simple_virchow2.pth \
+    --split test`
 
-`python src/tools/visualize_test_set.py \
-    --mil_checkpoint experiments/simple_mil_titan_20260218_042451/best_simple_titan.pth`
-
-`python src/tools/visualize_test_set.py \
-    --mil_checkpoint experiments/simple_virchow2_20260301_144010/best_simple_virchow2.pth \
-    --postfix crop_od`
+`python -m src.tools.visualize_heatmap_set \
+    --mil_checkpoint experiments/simple_virchow2_20260301_160636/best_simple_virchow2.pth \
+    --split test --postfix crop_od`
 
 
 `python src/tools/analyze_shortcuts.py \

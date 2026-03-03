@@ -28,8 +28,13 @@ from pathlib import Path
 from typing import List, Tuple
 
 import cv2
+import matplotlib.gridspec as gridspec
+import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
+import seaborn as sns
 import torch
+from sklearn.metrics import accuracy_score, confusion_matrix, recall_score
 from tqdm import tqdm
 
 import sys
@@ -57,7 +62,7 @@ def tissue_fraction_from_rgb(
     mean_od = od.mean(axis=2)  # (H,W)
     tissue_mask = mean_od > tissue_thr
     return float(tissue_mask.mean())
-
+analyze_shortcuts
 
 def space_bg_fractions_from_rgb(
     patch_rgb_uint8: np.ndarray,
@@ -237,6 +242,168 @@ def load_mil_model(checkpoint_path: Path, device: torch.device):
     model.load_state_dict(checkpoint["model_state_dict"])
     model.to(device).eval()
     return model, backbone_name, ckpt_args, checkpoint
+
+
+def generate_dashboard(csv_path: Path, out_path: Path, exp_name: str, split: str):
+    """Generate a comprehensive 1-page visualization dashboard."""
+    try:
+        df = pd.read_csv(csv_path)
+        if df.empty:
+            return
+
+        # Metrics Prep
+        y_true = df["gt_class"]
+        y_pred = df["pred_class"]
+        classes = ["ET", "PV", "PMF"]  # Standard order
+
+        acc = accuracy_score(y_true, y_pred)
+        recalls = recall_score(
+            y_true, y_pred, labels=classes, average=None, zero_division=0
+        )
+        macro_recall = recall_score(y_true, y_pred, average="macro", zero_division=0)
+
+        recall_dict = dict(zip(classes, recalls))
+        pv_recall = recall_dict.get("PV", 0)
+        et_recall = recall_dict.get("ET", 0)
+
+        n_roi = len(df)
+        n_patients = df["patient_id"].nunique()
+
+        # Figure setup (Increased height and adjusted ratios to prevent stretched wide plots)
+        fig = plt.figure(figsize=(18, 18))
+        gs = gridspec.GridSpec(
+            3, 3, height_ratios=[1, 1.2, 1.2], hspace=0.5, wspace=0.4
+        )
+        sns.set_theme(style="whitegrid", font_scale=1.1)
+
+        # A) Header
+        fig.suptitle(
+            f"Shortcut Analysis Dashboard | Exp: {exp_name} | Split: {split.upper()}\n"
+            f"Patients: {n_patients} | ROIs: {n_roi} | Acc: {acc:.1%} | Macro Recall: {macro_recall:.1%}\n"
+            f"PV Recall: {pv_recall:.1%} | ET Recall: {et_recall:.1%}",
+            fontsize=18,
+            fontweight="bold",
+            y=0.97,
+        )
+
+        # B) Panel 1: Confusion Matrix (Top Left)
+        ax1 = fig.add_subplot(gs[0, 0])
+        cm = confusion_matrix(y_true, y_pred, labels=classes)
+        sns.heatmap(
+            cm,
+            annot=True,
+            fmt="d",
+            cmap="Blues",
+            xticklabels=classes,
+            yticklabels=classes,
+            ax=ax1,
+            cbar=False,
+        )
+        ax1.set_title("Confusion Matrix (ROI-level)", fontweight="bold")
+        ax1.set_xlabel("Predicted")
+        ax1.set_ylabel("Ground Truth")
+
+        # C) Panel 2: Per-class Recall Bar (Top Middle)
+        ax2 = fig.add_subplot(gs[0, 1])
+        sns.barplot(x=classes, y=recalls, ax=ax2, palette="viridis")
+        ax2.set_title("Per-class Recall", fontweight="bold")
+        ax2.set_ylim(0, 1.05)
+        for i, v in enumerate(recalls):
+            ax2.text(i, v + 0.02, f"{v:.1%}", ha="center", fontweight="bold")
+
+        # F) Panel 5: PV Focus (Top Right)
+        ax3 = fig.add_subplot(gs[0, 2])
+        pv_df = df[df["gt_class"] == "PV"]
+        if not pv_df.empty:
+            pv_preds = pv_df["pred_class"].value_counts().reindex(classes).fillna(0)
+            sns.barplot(x=pv_preds.index, y=pv_preds.values, ax=ax3, palette="Set2")
+            ax3.set_title("PV Ground Truth Breakdown", fontweight="bold")
+            ax3.set_ylabel("Predicted Count")
+            for i, v in enumerate(pv_preds.values):
+                ax3.text(
+                    i,
+                    v + (pv_preds.max() * 0.02),
+                    int(v),
+                    ha="center",
+                    fontweight="bold",
+                )
+
+        # D) Panel 3: Shortcut Indicators (Middle Row, spans all 3 cols)
+        ax4 = fig.add_subplot(gs[1, :])
+        df["Prediction"] = df["is_correct"].map({1: "Correct", 0: "Incorrect"})
+
+        if all(col in df.columns for col in ["attn_high_bg", "attn_good"]):
+            df_melt = df.melt(
+                id_vars=["Prediction", "gt_class"],
+                value_vars=["attn_high_bg", "attn_good"],
+                var_name="Metric",
+                value_name="Value",
+            )
+            df_melt["Metric"] = df_melt["Metric"].map(
+                {
+                    "attn_high_bg": "Attn on High Background\n(Shortcut: Lower is better)",
+                    "attn_good": "Attn on Quality Tissue\n(Morphology: Higher is better)",
+                }
+            )
+            sns.boxplot(
+                data=df_melt,
+                x="Metric",
+                y="Value",
+                hue="Prediction",
+                palette={"Correct": "#2ecc71", "Incorrect": "#e74c3c"},
+                ax=ax4,
+                showfliers=False,
+            )
+            ax4.set_title(
+                "Shortcut Mechanism Evidence (Correct vs Incorrect)", fontweight="bold"
+            )
+            ax4.set_ylabel("Attention Fraction")
+            ax4.set_xlabel("")
+
+        # E) Panel 4: ROI Quality Effect (Bottom Row, spans all 3 cols)
+        ax5 = fig.add_subplot(gs[2, :])
+        bins = [0, 0.2, 0.4, 0.6, 0.8, 1.0]
+        labels = ["0-20%", "20-40%", "40-60%", "60-80%", "80-100%"]
+        df["bg_bin"] = pd.cut(
+            df["all_bg_mean"], bins=bins, labels=labels, include_lowest=True
+        )
+
+        bg_stats = (
+            df.groupby("bg_bin", observed=False)
+            .agg(Accuracy=("is_correct", "mean"), Count=("is_correct", "count"))
+            .reset_index()
+        )
+
+        sns.barplot(data=bg_stats, x="bg_bin", y="Accuracy", color="#3498db", ax=ax5)
+        ax5.set_title(
+            "ROI Quality Effect (Accuracy vs Background Fraction)", fontweight="bold"
+        )
+        ax5.set_ylim(0, 1.05)
+        ax5.set_xlabel("Background Fraction in ROI (all_bg_mean)")
+        ax5.set_ylabel("Accuracy")
+
+        for i, row in bg_stats.iterrows():
+            if row["Count"] > 0:
+                ax5.text(
+                    i,
+                    row["Accuracy"] + 0.02,
+                    f"{row['Accuracy']:.1%}\n(n={row['Count']})",
+                    ha="center",
+                    fontweight="bold",
+                    fontsize=10,
+                )
+
+        # Ignore tight_layout warnings and adjust rect to leave more room for the taller suptitle
+        import warnings
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            plt.tight_layout(rect=[0, 0, 1, 0.96])
+        plt.savefig(out_path, dpi=300, bbox_inches="tight")
+        plt.close()
+        print(f"📊 Dashboard successfully saved to: {out_path}")
+    except Exception as e:
+        print(f"⚠️ Could not generate dashboard: {e}")
 
 
 def main():
@@ -441,6 +608,11 @@ def main():
         writer.writerows(results)
 
     print(f"\n✅ Analysis complete! Saved {len(results)} rows to {out_path}")
+
+    # Generate Visualization Dashboard
+    plot_out_path = base_out_dir / f"shortcut_dashboard_{args.split}.png"
+    exp_name = Path(args.mil_checkpoint).parent.name
+    generate_dashboard(out_path, plot_out_path, exp_name=exp_name, split=args.split)
 
     if bad_patch_count > 0:
         print(

@@ -1,31 +1,35 @@
 """
-Sorted Grid Gallery — ViT × MIL Attention Heatmaps.
+Batch Heatmap Set Visualization.
 
-For a given source image, generates a single grid figure with ALL patches
-sorted by MIL attention (highest first). Each cell shows the raw patch
-overlaid with ViT CLS attention (COLORMAP_TURBO, dynamic alpha).
+Generates attention heatmaps for patients in a specific split (train/val/test/all) 
+of a trained MIL experiment. Loads the checkpoint, recovers the specified indices, 
+and iterates over every patient/image to produce sorted grid galleries.
 
-Output: results/grid_heatmaps/{Patient}/{ImageID}_grid.png
+Output: results/heatmaps/{ExperimentName}/{split}/{Class}/{PatientID}/
 
 Usage:
-    python src/visualize_heatmap.py \
+    python -m src.tools.visualize_heatmap_set \
         --mil_checkpoint experiments/simple_titan_.../best_simple_titan.pth \
-        --patient_dir "data/processed_subtype/PV/PV1 G2" \
-        --image_id 1
+        --split test
 
-    # All images for a patient:
-    python src/visualize_heatmap.py \
-        --mil_checkpoint experiments/simple_titan_.../best_simple_titan.pth \
-        --patient_dir "data/processed_subtype/PV/PV1 G2"
+    # Custom split and data root:
+    python -m src.tools.visualize_heatmap_set \
+        --mil_checkpoint experiments/simple_titan_.../best.pth \
+        --data_root data \
+        --split val \
+        --seed 42
 """
 
 import argparse
+import math
 import re
+import sys
 from collections import defaultdict
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 
 import cv2
+import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torch.nn as nn
@@ -33,13 +37,23 @@ import torch.nn.functional as F
 from PIL import Image
 from tqdm import tqdm
 
-from core.config import CLASS_MAP, CLASS_MAP_INV, RESULTS_DIR, hf_login
+# Add src/ to path so imports work when run from project root
+_SRC_DIR = str(Path(__file__).resolve().parent.parent)
+if _SRC_DIR not in sys.path:
+    sys.path.insert(0, _SRC_DIR)
+
+from core.config import CLASS_MAP, CLASS_MAP_INV, hf_login
+from data.bag_dataset import MPNBagDatasetFull
 from models.hybrid_mil import HybridMIL
 from models.simple_mil import SimpleGatedMIL
+
+CLASS_NAMES = [CLASS_MAP_INV[i] for i in range(len(CLASS_MAP))]
+
 
 # =============================================================================
 # Constants
 # =============================================================================
+
 
 BACKBONE_CONFIG: Dict[str, Dict] = {
     "titan": {
@@ -58,8 +72,6 @@ BACKBONE_CONFIG: Dict[str, Dict] = {
         "display_name": "Virchow2",
     },
 }
-
-CLASS_NAMES = [CLASS_MAP_INV[i] for i in range(len(CLASS_MAP))]
 
 
 # =============================================================================
@@ -84,7 +96,7 @@ def parse_patch_filename(filename: str) -> Tuple[str, int, int]:
 
 def group_patches_by_image(
     patient_dir: Path,
-) -> Dict[str, List[Tuple[Path, int, int]]]:
+) -> Dict[str, list]:
     """
     Group all patches in a patient directory by source image ID.
 
@@ -92,7 +104,7 @@ def group_patches_by_image(
         Dict mapping image_id → list of (patch_path, row, col),
         sorted by (row, col) within each group.
     """
-    groups: Dict[str, List[Tuple[Path, int, int]]] = defaultdict(list)
+    groups: Dict[str, list] = defaultdict(list)
 
     for patch_path in patient_dir.iterdir():
         if not patch_path.suffix == ".png":
@@ -487,9 +499,6 @@ def generate_grid_gallery(
         n_cols: Number of columns in the grid (default: 8).
         device: Torch device.
     """
-    import math
-    import matplotlib.pyplot as plt
-
     # ── 1. Group patches for this image ─────────────────────────────
     all_groups = group_patches_by_image(patient_dir)
     if image_id not in all_groups:
@@ -529,10 +538,12 @@ def generate_grid_gallery(
     # ── 4. Create Matplotlib grid ───────────────────────────────────
     n_rows = math.ceil(num_patches / n_cols)
     cell_size = 2.2  # inches per cell
+    header_height = 1.0  # inches reserved for suptitle
+    fig_height = n_rows * cell_size + header_height
     fig, axes = plt.subplots(
         n_rows,
         n_cols,
-        figsize=(n_cols * cell_size, n_rows * cell_size + 1.2),
+        figsize=(n_cols * cell_size, fig_height),
         facecolor="white",
     )
     # Ensure axes is always 2D
@@ -583,11 +594,97 @@ def generate_grid_gallery(
         axes[r_idx, c_idx].axis("off")
 
     # ── 7. Save ─────────────────────────────────────────────────────
-    plt.subplots_adjust(wspace=0.05, hspace=0.35, top=0.93)
+    dynamic_top = 1.0 - (header_height / fig_height)
+    plt.subplots_adjust(wspace=0.05, hspace=0.35, top=dynamic_top)
     save_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(str(save_path), dpi=200, bbox_inches="tight", pad_inches=0.3)
     plt.close(fig)
     print(f"    ✅ Saved: {save_path}")
+
+
+# =============================================================================
+# Checkpoint Helpers
+# =============================================================================
+
+
+def load_checkpoint_metadata(
+    checkpoint_path: Path,
+    device: torch.device,
+) -> Tuple[dict, str, str, dict]:
+    """
+    Load checkpoint and extract metadata.
+    """
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    ckpt_args = checkpoint["args"]
+    backbone_name = ckpt_args["backbone"]
+    model_type = ckpt_args["model_type"]
+    return checkpoint, backbone_name, model_type, ckpt_args
+
+
+def get_target_patients(
+    dataset: MPNBagDatasetFull,
+    checkpoint: dict,
+    ckpt_args: dict,
+    split: str,
+    seed_arg: Any,
+) -> Dict[str, Dict]:
+    """
+    Map targeted split indices to unique patients with their metadata.
+    """
+    seed = seed_arg if seed_arg is not None else ckpt_args.get("seed", 42)
+    indices = []
+
+    if split != "all":
+        # 1. Best Practice: Explicitly load target split directly from checkpoint
+        if split == "train" and "train_idx" in checkpoint:
+            print("  ✅ Loading 'train' patients directly from checkpoint...")
+            indices = checkpoint["train_idx"]
+        elif split == "val" and "val_idx" in checkpoint:
+            print("  ✅ Loading 'val' patients directly from checkpoint...")
+            indices = checkpoint["val_idx"]
+        elif split == "test" and "test_idx" in checkpoint:
+            print("  ✅ Loading 'test' patients directly from checkpoint...")
+            indices = checkpoint["test_idx"]
+
+        # 2. Fallback: If not found, fallback to original seed-based logic
+        else:
+            print(
+                f"  ⚠️ '{split}_idx' not found in checkpoint! Falling back to original seed logic..."
+            )
+            try:
+                from train_mil import patient_split
+
+                train_idx, val_idx, test_idx = patient_split(dataset, seed=seed)
+                if split == "train":
+                    indices = train_idx
+                elif split == "val":
+                    indices = val_idx
+                else:
+                    indices = test_idx
+            except ImportError:
+                print(
+                    "  ❌ Could not import patient_split from train_mil. Please ensure train_mil is in your src directory."
+                )
+                sys.exit(1)
+    else:
+        # 'all' split
+        indices = list(range(len(dataset.samples)))
+
+    patients: Dict[str, Dict] = {}
+    for idx in indices:
+        pt_path, label = dataset.samples[idx]
+        patient_id = pt_path.parent.name
+        class_name = pt_path.parent.parent.name
+
+        if patient_id not in patients:
+            patients[patient_id] = {
+                "class_name": class_name,
+                "label": label,
+                "feature_paths": [],
+            }
+        patients[patient_id]["feature_paths"].append(pt_path)
+
+    return patients
 
 
 # =============================================================================
@@ -597,21 +694,8 @@ def generate_grid_gallery(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Generate a sorted grid gallery of per-patch ViT attention heatmaps.",
+        description="Generate attention heatmaps for patients in a specific split.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  # Single image:
-  python src/visualize_heatmap.py \\
-      --mil_checkpoint experiments/simple_titan/best.pth \\
-      --patient_dir "data/processed_subtype/PV/PV1 G2" \\
-      --image_id 1
-
-  # All images for a patient:
-  python src/visualize_heatmap.py \\
-      --mil_checkpoint experiments/simple_titan/best.pth \\
-      --patient_dir "data/processed_subtype/PV/PV1 G2"
-        """,
     )
     parser.add_argument(
         "--mil_checkpoint",
@@ -620,28 +704,29 @@ Examples:
         help="Path to trained MIL model checkpoint (.pth).",
     )
     parser.add_argument(
-        "--patient_dir",
+        "--split",
         type=str,
-        required=True,
-        help="Patient directory containing patch PNGs.",
+        default="test",
+        choices=["train", "val", "test", "all"],
+        help="Dataset split to visualize (default: test).",
     )
     parser.add_argument(
-        "--image_id",
-        type=str,
+        "--seed",
+        type=int,
         default=None,
-        help="Source image ID (e.g., '1'). If omitted, processes all images.",
+        help="Random seed for splitting if split indices are not in checkpoint.",
     )
     parser.add_argument(
-        "--features_dir",
+        "--data_root",
         type=str,
-        default=None,
-        help="Override features directory. Default: auto-detected from backbone.",
+        default="data",
+        help="Root data directory (default: data).",
     )
     parser.add_argument(
         "--output_dir",
         type=str,
-        default=None,
-        help="Output directory. Default: results/grid_heatmaps.",
+        default="results/heatmaps",
+        help="Base output directory (default: results/heatmaps).",
     )
     parser.add_argument(
         "--patch_size",
@@ -655,8 +740,20 @@ Examples:
         default=8,
         help="Number of columns in the grid (default: 8).",
     )
+    parser.add_argument(
+        "--postfix",
+        type=str,
+        default="",
+        help="Optional string to append to the experiment name.",
+    )
+    parser.add_argument(
+        "--subtype",
+        type=str,
+        default=None,
+        choices=["ET", "PV", "PMF"],
+        help="Specific subtype to visualize. If not provided, visualizes all subtypes.",
+    )
 
-    # Auto-detect device
     if torch.cuda.is_available():
         _default_device = "cuda"
     elif torch.backends.mps.is_available():
@@ -681,88 +778,127 @@ Examples:
 def main() -> None:
     args = parse_args()
     device = torch.device(args.device)
-
-    # ── 1. Load MIL model ───────────────────────────────────────────
-    print("=" * 60)
-    print("Sorted Grid Gallery — ViT × MIL Attention Heatmaps")
-    print("=" * 60)
-
     mil_checkpoint = Path(args.mil_checkpoint)
-    mil_model, model_type, backbone_name = load_mil_model(mil_checkpoint, device)
-    print(f"  MIL Model:  {model_type.upper()}")
-    print(f"  Backbone:   {BACKBONE_CONFIG[backbone_name]['display_name']}")
-    print(f"  Checkpoint: {mil_checkpoint}")
 
-    # ── 2. Load ViT backbone ────────────────────────────────────────
-    print(f"\nLoading {BACKBONE_CONFIG[backbone_name]['display_name']} backbone...")
+    print("=" * 60)
+    print("Batch Heatmap Set Visualization")
+    print("=" * 60)
+
+    checkpoint, backbone_name, model_type, ckpt_args = load_checkpoint_metadata(
+        mil_checkpoint, device
+    )
+    cfg = BACKBONE_CONFIG[backbone_name]
+    features_dir = Path(args.data_root) / cfg["feature_dir"]
+    exp_name = mil_checkpoint.parent.name
+
+    print(f"  Checkpoint:  {mil_checkpoint}")
+    print(f"  Experiment:  {exp_name}")
+    print(f"  Model:       {model_type.upper()}")
+    print(f"  Backbone:    {cfg['display_name']}")
+    print(f"  Split:       {args.split.upper()}")
+    print(f"  Device:      {device}")
+
+    # Initialise dataset and discover target patients
+    max_patches = ckpt_args.get("max_patches", None)
+    dataset = MPNBagDatasetFull(features_dir, max_patches=max_patches)
+    patients = get_target_patients(
+        dataset, checkpoint, ckpt_args, args.split, args.seed
+    )
+
+    if args.subtype is not None:
+        patients = {
+            pid: info
+            for pid, info in patients.items()
+            if info["class_name"] == args.subtype
+        }
+        print(f"\n  Filtering to subtype: {args.subtype}")
+
+    class_counts: Dict[str, int] = defaultdict(int)
+    for info in patients.values():
+        class_counts[info["class_name"]] += 1
+
+    print(f"\n  Target Patients: {len(patients)}")
+    for cn in CLASS_NAMES:
+        print(f"    {cn}: {class_counts.get(cn, 0)} patients")
+
+    print("\nLoading MIL model...")
+    mil_model, _, _ = load_mil_model(mil_checkpoint, device)
+    print("  ✅ MIL model loaded.\n")
+
+    print(f"Loading {cfg['display_name']} backbone...")
     backbone, backbone_transform, get_vit_attention = load_backbone(
         backbone_name, device
     )
-    print(f"  ✅ Backbone loaded.\n")
+    print("  ✅ Backbone loaded.\n")
 
-    # ── 3. Setup paths ──────────────────────────────────────────────
-    patient_dir = Path(args.patient_dir)
-    patient_name = patient_dir.name
-    class_name = patient_dir.parent.name
+    # ── Setup output directory (Similar to analyze_shortcuts) ──────
+    folder_name = f"{exp_name}_{args.postfix}" if args.postfix else exp_name
 
-    # Features directory
-    if args.features_dir:
-        features_dir = Path(args.features_dir)
-    else:
-        feature_dir_name = BACKBONE_CONFIG[backbone_name]["feature_dir"]
-        data_root = patient_dir.parent.parent.parent
-        features_dir = data_root / feature_dir_name
+    # Structure: base_dir / exp_name / split
+    output_root = Path(args.output_dir) / folder_name / args.split
+    output_root.mkdir(parents=True, exist_ok=True)
 
-    patient_features_dir = features_dir / class_name / patient_name
-
-    # Output directory
-    if args.output_dir:
-        output_dir = Path(args.output_dir)
-    else:
-        output_dir = RESULTS_DIR / "grid_heatmaps"
-
-    print(f"  Patient:    {class_name}/{patient_name}")
-    print(f"  Patches:    {patient_dir}")
-    print(f"  Features:   {patient_features_dir}")
-    print(f"  Output:     {output_dir}")
-
-    # ── 4. Discover images ──────────────────────────────────────────
-    all_groups = group_patches_by_image(patient_dir)
-
-    if args.image_id:
-        image_ids = [args.image_id]
-    else:
-        image_ids = sorted(all_groups.keys(), key=lambda x: int(x))
-
-    print(f"  Images:     {len(image_ids)}")
+    print(f"  Output: {output_root}")
     print("=" * 60)
 
-    # ── 5. Generate grid gallery for each image ─────────────────────
-    for img_id in image_ids:
-        features_path = patient_features_dir / f"{img_id}.pt"
-        if not features_path.exists():
-            print(f"  ⚠ Features not found: {features_path} — skipping.")
-            continue
+    # Locate raw patch directories
+    raw_patch_root = Path(args.data_root) / "processed_subtype"
 
-        print(f"\n  Image {img_id}...")
-        save_path = output_dir / patient_name / f"{img_id}_grid.png"
+    total_images = 0
+    skipped_patients = 0
 
-        generate_grid_gallery(
-            patient_dir=patient_dir,
-            image_id=img_id,
-            mil_model=mil_model,
-            get_vit_attention=get_vit_attention,
-            backbone_transform=backbone_transform,
-            features_path=features_path,
-            class_name=class_name,
-            save_path=save_path,
-            patch_size=args.patch_size,
-            n_cols=args.n_cols,
-            device=device,
+    for patient_idx, (patient_id, info) in enumerate(sorted(patients.items()), start=1):
+        class_name = info["class_name"]
+        feature_paths = sorted(info["feature_paths"])
+
+        print(
+            f"\n[{patient_idx}/{len(patients)}] "
+            f"{class_name}/{patient_id}  ({len(feature_paths)} images)"
         )
 
+        patient_patch_dir = raw_patch_root / class_name / patient_id
+        if not patient_patch_dir.exists():
+            print(f"  ⚠ Raw patch directory not found: {patient_patch_dir} — skipping.")
+            skipped_patients += 1
+            continue
+
+        available_groups = group_patches_by_image(patient_patch_dir)
+
+        # Output subdirectory for this patient
+        patient_output_dir = output_root / class_name / patient_id
+
+        for feat_path in feature_paths:
+            img_id = feat_path.stem
+
+            if img_id not in available_groups:
+                print(f"  ⚠ No raw patches for image {img_id} — skipping.")
+                continue
+
+            save_path = patient_output_dir / f"{img_id}_grid.png"
+
+            print(f"  Image {img_id}...")
+            generate_grid_gallery(
+                patient_dir=patient_patch_dir,
+                image_id=img_id,
+                mil_model=mil_model,
+                get_vit_attention=get_vit_attention,
+                backbone_transform=backbone_transform,
+                features_path=feat_path,
+                class_name=class_name,
+                save_path=save_path,
+                patch_size=args.patch_size,
+                n_cols=args.n_cols,
+                device=device,
+            )
+            total_images += 1
+
     print(f"\n{'=' * 60}")
-    print("Grid Gallery Generation Complete.")
+    print(f"Batch Heatmap Generation Complete ({args.split.upper()} Set)")
+    print(f"{'=' * 60}")
+    print(f"  Patients processed: {len(patients) - skipped_patients}/{len(patients)}")
+    print(f"  Images processed:   {total_images}")
+    print(f"  Patients skipped:   {skipped_patients}")
+    print(f"  Output directory:   {output_root}")
     print(f"{'=' * 60}")
 
 
