@@ -23,7 +23,6 @@ Usage:
 import argparse
 import csv
 import re
-from collections import defaultdict
 from pathlib import Path
 from typing import List, Tuple
 
@@ -466,153 +465,196 @@ def main():
     base_out_dir = Path(args.output_dir) / exp_name
     base_out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Resolve target patients for the chosen split
+    # Resolve target indices for the chosen split
     seed = args.seed if args.seed is not None else ckpt_args.get("seed", 42)
 
+    from data.bag_dataset import MPNBagDatasetFull
+
+    # Do NOT pass max_patches here — it only affects __getitem__, not sample discovery.
+    # This matches how train_mil.py constructs the dataset for splitting.
+    dataset = MPNBagDatasetFull(features_root)
+
     if args.split != "all":
-        from data.bag_dataset import MPNBagDatasetFull
-
-        dataset = MPNBagDatasetFull(
-            features_root, max_patches=ckpt_args.get("max_patches")
-        )
-
         # 1. Best Practice: Explicitly load target split directly from checkpoint
         if args.split == "train" and "train_idx" in checkpoint:
-            print("✅ Loading 'train' patients directly from checkpoint...")
-            indices = checkpoint["train_idx"]
+            print("✅ Loading 'train' indices directly from checkpoint...")
+            target_indices = checkpoint["train_idx"]
 
         elif args.split == "val" and "val_idx" in checkpoint:
-            print("✅ Loading 'val' patients directly from checkpoint...")
-            indices = checkpoint["val_idx"]
+            print("✅ Loading 'val' indices directly from checkpoint...")
+            target_indices = checkpoint["val_idx"]
 
         elif args.split == "test" and "test_idx" in checkpoint:
-            print("✅ Loading 'test' patients directly from checkpoint...")
-            indices = checkpoint["test_idx"]
+            print("✅ Loading 'test' indices directly from checkpoint...")
+            target_indices = checkpoint["test_idx"]
 
         # 2. Fallback: If not found (older models), fallback to the original seed-based split logic
         else:
             print(
-                f"⚠️ '{args.split}_idx' not found in checkpoint! Falling back to original seed logic..."
+                f"⚠️ '{args.split}_idx' not found in checkpoint! "
+                f"Falling back to patient_split(seed={seed}). "
+                f"Results may NOT match the original training split if patient_split logic has changed."
             )
             from train_mil import patient_split
 
             train_idx, val_idx, test_idx = patient_split(dataset, seed=seed)
             if args.split == "train":
-                indices = train_idx
+                target_indices = train_idx
             elif args.split == "val":
-                indices = val_idx
+                target_indices = val_idx
             else:
-                indices = test_idx
-
-        target_patients = set(dataset.samples[i][0].parent.name for i in indices)
-        print(f"Found {len(target_patients)} patients in the '{args.split}' set.")
-
+                target_indices = test_idx
     else:
-        target_patients = None
+        target_indices = list(range(len(dataset)))
+
+    # Print detailed split breakdown (mirrors train_mil.py log format)
+    print(f"\n  Total bags in dataset: {len(dataset)}")
+    print(f"  Split '{args.split}': {len(target_indices)} ROIs")
+    split_stats = {}
+    for idx in target_indices:
+        _, label = dataset.samples[idx]
+        pt_path = dataset.samples[idx][0]
+        patient_id = pt_path.parent.name
+        if label not in split_stats:
+            split_stats[label] = {"patients": set(), "bags": 0}
+        split_stats[label]["patients"].add(patient_id)
+        split_stats[label]["bags"] += 1
+    parts = []
+    for label in sorted(split_stats.keys()):
+        subtype = CLASS_NAMES[label]
+        n_pat = len(split_stats[label]["patients"])
+        n_bags = split_stats[label]["bags"]
+        parts.append(f"{subtype}: {n_pat:2d} ({n_bags:3d})")
+    print("  Breakdown: " + " | ".join(parts))
+    print()
 
     results = []
     bad_patch_count = 0
 
-    print(f"Scanning directories...")
+    print(
+        f"Analyzing {len(target_indices)} ROIs directly from the '{args.split}' split..."
+    )
     print(f"Output: {base_out_dir}")
-    # Find all patient directories (e.g., data/processed_subtype/PV/PV1 G2)
-    for class_dir in patches_root.iterdir():
-        if not class_dir.is_dir() or class_dir.name.startswith("."):
-            continue
-        gt_class = class_dir.name
 
-        for patient_dir in class_dir.iterdir():
-            if not patient_dir.is_dir():
-                continue
-            patient_id = patient_dir.name
+    for idx in tqdm(target_indices, desc="Analyzing ROIs"):
+        pt_path, label_idx = dataset.samples[idx]
+        patient_id = pt_path.parent.name
+        img_id = pt_path.stem
+        gt_class = CLASS_NAMES[label_idx]
 
-            # Skip patients not in the target split
-            if target_patients is not None and patient_id not in target_patients:
-                continue
+        feature_path = pt_path
 
-            # Group patches by Image ID
-            img_groups = defaultdict(list)
-            for patch_file in patient_dir.glob("*.png"):
+        # 1. Get MIL Prediction first (Guarantees the ROI is always evaluated!)
+        with torch.inference_mode():
+            data = torch.load(feature_path, map_location=device, weights_only=False)
+
+            if isinstance(data, dict):
+                features = data.get("feats", data.get("features")).to(device)
+                metrics = {
+                    k: v.to(device) if isinstance(v, torch.Tensor) else v
+                    for k, v in data.get("metrics", {}).items()
+                }
+            else:
+                features = data.to(device)
+                metrics = {}
+
+            # Only pass metrics if the model was trained with --attention_bias
+            use_bias = ckpt_args.get("attention_bias", False)
+
+            if ckpt_args.get("model_type", "simple") == "simple":
+                logits, attention, _ = model(
+                    features,
+                    return_attention=True,
+                    metrics=metrics if use_bias else None,
+                )
+            else:
+                logits, attention, _ = model(features, return_attention=True)
+
+            pred_class = CLASS_NAMES[logits.argmax().item()]
+            attention = attention.cpu().numpy().flatten()
+
+        # 2. Locate corresponding patches for Shortcut Analysis
+        patient_patch_dir = patches_root / gt_class / patient_id
+        patches = []
+        if patient_patch_dir.exists():
+            for patch_file in patient_patch_dir.glob(f"{img_id}_*.png"):
                 try:
-                    img_id, r, c = parse_patch_filename(patch_file.name)
-                    img_groups[img_id].append((patch_file, r, c))
+                    # More robust regex that allows letters in img_id
+                    match = re.search(r"^(.*?)_r(\d+)c(\d+)\.png$", patch_file.name)
+                    if match and str(match.group(1)) == str(img_id):
+                        patches.append(
+                            (patch_file, int(match.group(2)), int(match.group(3)))
+                        )
                 except ValueError:
                     bad_patch_count += 1
 
-            # Process each image (ROI)
-            for img_id, patches in tqdm(
-                img_groups.items(), desc=f"Analyzing {patient_id}", leave=False
-            ):
-                patches.sort(key=lambda x: (x[1], x[2]))  # Ensure sorted order
+        # 3. Calculate Shortcut Metrics (Only if patches are found)
+        summary = {
+            k: np.nan
+            for k in [
+                "attn_space",
+                "attn_tissue",
+                "attn_bg",
+                "attn_low_tissue",
+                "attn_high_bg",
+                "attn_high_space",
+                "attn_good",
+                "top1_tissue",
+                "top1_bg",
+                "top1_space",
+                "top1_is_low_tissue",
+                "corr_attn_tissue",
+                "topk_space_mean",
+                "all_space_mean",
+                "space_enrichment",
+                "topk_tissue_mean",
+                "all_tissue_mean",
+                "tissue_enrichment",
+                "topk_bg_mean",
+                "all_bg_mean",
+                "bg_enrichment",
+            ]
+        }
 
-                feature_path = features_root / gt_class / patient_id / f"{img_id}.pt"
-                if not feature_path.exists():
+        if patches:
+            patches.sort(key=lambda x: (x[1], x[2]))
+
+            if len(attention) != len(patches):
+                min_len = min(len(attention), len(patches))
+                attention = attention[:min_len]
+                patches = patches[:min_len]
+                attention = attention / (attention.sum() + 1e-8)
+
+            space_fracs, bg_blank_fracs, tissue_fracs = [], [], []
+            for patch_path, _, _ in patches:
+                img_bgr = cv2.imread(str(patch_path))
+                if img_bgr is None:
                     continue
+                img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+                space_f, bg_f = space_bg_fractions_from_rgb(img_rgb)
+                space_fracs.append(space_f)
+                bg_blank_fracs.append(bg_f)
+                tissue_fracs.append(tissue_fraction_from_rgb(img_rgb))
 
-                # Get MIL Attention
-                with torch.inference_mode():
-                    data = torch.load(
-                        feature_path, map_location=device, weights_only=False
-                    )
-
-                    if isinstance(data, dict):
-                        features = data.get("feats", data.get("features")).to(device)
-                        metrics = {
-                            k: v.to(device) if isinstance(v, torch.Tensor) else v
-                            for k, v in data.get("metrics", {}).items()
-                        }
-                    else:
-                        features = data.to(device)
-                        metrics = {}
-
-                    if ckpt_args.get("model_type", "simple") == "simple":
-                        logits, attention, _ = model(
-                            features, return_attention=True, metrics=metrics
-                        )
-                    else:
-                        logits, attention, _ = model(features, return_attention=True)
-
-                    pred_class = CLASS_NAMES[logits.argmax().item()]
-                    attention = attention.cpu().numpy().flatten()
-
-                # Check patch mismatch
-                if len(attention) != len(patches):
-                    print(
-                        f"Mismatch in {patient_id}/{img_id}: {len(attention)} features vs {len(patches)} patches. Skipping."
-                    )
-                    continue
-
-                # Calculate Space, BG Blank & Tissue fractions per patch
-                space_fracs, bg_blank_fracs, tissue_fracs = [], [], []
-                for patch_path, _, _ in patches:
-                    img_bgr = cv2.imread(str(patch_path))
-                    img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
-                    space_f, bg_f = space_bg_fractions_from_rgb(img_rgb)
-                    space_fracs.append(space_f)
-                    bg_blank_fracs.append(bg_f)
-                    tissue_fracs.append(tissue_fraction_from_rgb(img_rgb))
-
-                # Summarize
+            if space_fracs:
                 summary = summarize_roi(
                     attention, space_fracs, tissue_fracs, bg_blank_fracs
                 )
+        else:
+            print(
+                f"⚠️ No PNGs found for {patient_id}/{img_id}. Evaluating Accuracy only."
+            )
 
-                # Active Sanity Check Warning
-                if summary["corr_attn_tissue"] < -0.5:
-                    print(
-                        f"⚠️ WARNING: Strong negative correlation ({summary['corr_attn_tissue']:.2f}) in {patient_id}/{img_id}. Possible patch-feature mismatch!"
-                    )
-
-                # Append to results
-                row = {
-                    "patient_id": patient_id,
-                    "image_id": img_id,
-                    "gt_class": gt_class,
-                    "pred_class": pred_class,
-                    "is_correct": int(gt_class == pred_class),
-                    **summary,
-                }
-                results.append(row)
+        # 4. Append to results (Every ROI is logged!)
+        row = {
+            "patient_id": patient_id,
+            "image_id": img_id,
+            "gt_class": gt_class,
+            "pred_class": pred_class,
+            "is_correct": int(gt_class == pred_class),
+            **summary,
+        }
+        results.append(row)
 
     # Save single master CSV
     if not results:

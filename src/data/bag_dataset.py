@@ -81,10 +81,8 @@ class MPNBagDatasetFull(Dataset):
     def __init__(
         self,
         features_dir: Path,
-        max_patches: int = None,
     ) -> None:
         self.samples: List[Tuple[Path, int]] = []
-        self.max_patches = max_patches
 
         for class_name, label in CLASS_MAP.items():
             class_dir = features_dir / class_name
@@ -115,17 +113,6 @@ class MPNBagDatasetFull(Dataset):
         else:
             feat = data
             metrics = {}
-
-        # Optionally limit number of patches
-        if self.max_patches is not None and feat.size(0) > self.max_patches:
-            indices = torch.randperm(feat.size(0))[: self.max_patches]
-            feat = feat[indices]
-            # Slice metrics tensors to match features
-            if metrics:
-                metrics = {
-                    k: v[indices] if isinstance(v, torch.Tensor) else v
-                    for k, v in metrics.items()
-                }
 
         slide_id = pt_path.stem
         return feat, label, slide_id, metrics

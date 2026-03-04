@@ -122,23 +122,24 @@ def patient_split(
     val_idx: List[int] = []
     test_idx: List[int] = []
 
+    # Hardcoded splits: {label_idx: (n_val, n_test)}
+    # Assuming CLASS_MAP is 0: ET (12 total), 1: PV (9 total), 2: PMF (21 total)
+    split_targets = {
+        0: (2, 2),  # ET  -> Train 8, Val 2, Test 2
+        1: (2, 2),  # PV  -> Train 5, Val 2, Test 2
+        2: (3, 3),  # PMF -> Train 15, Val 3, Test 3
+    }
+
     for label in sorted(label_to_patients.keys()):
         patients = label_to_patients[label]
         rng.shuffle(patients)
 
-        n = len(patients)
-        n_train = int(n * train_ratio)
-        n_val = int(n * val_ratio)
+        # Get the target counts for this class
+        n_val, n_test = split_targets.get(label, (1, 1))
+        n_train = len(patients) - n_val - n_test
 
-        # Guarantee at least 1 patient in val and test when possible
-        if n >= 3:
-            n_val = max(n_val, 1)
-            n_test = n - n_train - n_val
-            if n_test < 1:
-                n_test = 1
-                n_train = n - n_val - n_test
-        else:
-            n_test = n - n_train - n_val
+        if n_train < 0:
+            raise ValueError(f"Not enough patients in class {label} to split!")
 
         train_patients = patients[:n_train]
         val_patients = patients[n_train : n_train + n_val]
@@ -443,12 +444,6 @@ def parse_args() -> argparse.Namespace:
         help="Weight for instance-level loss (default: 0.2). Set to 0.0 to disable.",
     )
     parser.add_argument(
-        "--max_patches",
-        type=int,
-        default=None,
-        help="Max patches per bag (for memory management).",
-    )
-    parser.add_argument(
         "--topk",
         type=int,
         default=0,
@@ -531,7 +526,7 @@ def main() -> None:
 
     # ── Data ──────────────────────────────────────────────────────────
     log(f"\nLoading {display_name} features from: {features_dir}", log_file)
-    full_dataset = MPNBagDatasetFull(features_dir, max_patches=args.max_patches)
+    full_dataset = MPNBagDatasetFull(features_dir)
     log(f"  Total bags: {len(full_dataset)}", log_file)
 
     train_idx, val_idx, test_idx = patient_split(full_dataset, seed=args.seed)
