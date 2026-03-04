@@ -6,6 +6,7 @@ Analyzes raw data and processed patches, providing summary statistics
 for both subtype (H&E) and grading (Reticulin) tasks.
 """
 
+import argparse
 import re
 import sys
 from collections import defaultdict
@@ -33,9 +34,12 @@ def count_raw_he_images(raw_dir: Path) -> dict:
     H&E images are identified as files that do NOT start with 'reti'.
 
     Returns:
-        dict: {subtype: {'patients': int, 'images': int}}
+        dict: {subtype: {'patients': int, 'images': int, 'patient_dict': {name: count}}}
     """
-    stats = {subtype: {"patients": 0, "images": 0} for subtype in CLASS_MAP.keys()}
+    stats = {
+        subtype: {"patients": 0, "images": 0, "patient_dict": {}}
+        for subtype in CLASS_MAP.keys()
+    }
 
     for subtype in CLASS_MAP.keys():
         subtype_dir = raw_dir / subtype
@@ -46,7 +50,9 @@ def count_raw_he_images(raw_dir: Path) -> dict:
         stats[subtype]["patients"] = len(patient_dirs)
 
         image_count = 0
+        patient_dict = {}
         for patient_dir in patient_dirs:
+            patient_images = 0
             for ext in IMAGE_EXTENSIONS:
                 # Count only H&E images (NOT starting with 'reti')
                 he_images = [
@@ -54,8 +60,11 @@ def count_raw_he_images(raw_dir: Path) -> dict:
                     for f in patient_dir.glob(f"*{ext}")
                     if not f.name.lower().startswith("reti")
                 ]
-                image_count += len(he_images)
+                patient_images += len(he_images)
+            patient_dict[patient_dir.name] = patient_images
+            image_count += patient_images
         stats[subtype]["images"] = image_count
+        stats[subtype]["patient_dict"] = patient_dict
 
     return stats
 
@@ -193,25 +202,127 @@ def print_table(title: str, headers: list, rows: list, col_widths: list = None):
     print(header_row)
     print("-" * total_width)
 
-    # Rows
+    # Separate caller-provided "Total" row from data rows
+    caller_total = None
+    if len(rows) > 1 and str(rows[-1][0]).strip() == "Total":
+        caller_total = rows[-1]
+        rows = rows[:-1]
+
+    # Data rows
     for row in rows:
         row_str = "|".join(str(cell).center(w) for cell, w in zip(row, col_widths))
         print(row_str)
 
-    # Total row
-    if len(rows) > 1:
+    # Total row (auto-compute or use caller-provided)
+    if len(rows) > 1 or caller_total:
         print("-" * total_width)
-        totals = ["Total"]
-        for i in range(1, len(headers)):
-            totals.append(sum(row[i] for row in rows))
+        if caller_total:
+            totals = caller_total
+        else:
+            totals = ["Total"]
+            for i in range(1, len(headers)):
+                try:
+                    totals.append(sum(row[i] for row in rows))
+                except TypeError:
+                    totals.append("")
         total_row = "|".join(str(cell).center(w) for cell, w in zip(totals, col_widths))
         print(total_row)
 
     print("=" * total_width)
 
 
+def calculate_actual_split(features_dir: Path, seed: int = 42) -> tuple:
+    """
+    Calculate the actual train/val/test split using the same logic as train_mil.py.
+
+    Returns:
+        (headers, rows) suitable for print_table.
+    """
+    from data.bag_dataset import MPNBagDatasetFull
+    from train_mil import patient_split
+    from core.config import CLASS_MAP_INV
+
+    dataset = MPNBagDatasetFull(features_dir)
+    train_idx, val_idx, test_idx = patient_split(dataset, seed=seed)
+
+    # Collect stats per split per label
+    stats = {
+        split: {label: {"patients": set(), "images": 0} for label in CLASS_MAP_INV}
+        for split in ["Train", "Val", "Test"]
+    }
+
+    for split_name, indices in [
+        ("Train", train_idx),
+        ("Val", val_idx),
+        ("Test", test_idx),
+    ]:
+        for idx in indices:
+            pt_path, label = dataset.samples[idx]
+            patient_id = pt_path.parent.name
+            stats[split_name][label]["patients"].add(patient_id)
+            stats[split_name][label]["images"] += 1
+
+    # Build pivot table
+    headers = [
+        "Subtype",
+        "Train (Pat/Img)",
+        "Val (Pat/Img)",
+        "Test (Pat/Img)",
+        "Total (Pat/Img)",
+    ]
+    rows = []
+    totals = {"Train": [0, 0], "Val": [0, 0], "Test": [0, 0]}
+
+    for label in sorted(CLASS_MAP_INV.keys()):
+        subtype = CLASS_MAP_INV[label]
+        cells = {}
+        total_pat, total_img = 0, 0
+        for split_name in ["Train", "Val", "Test"]:
+            pat = len(stats[split_name][label]["patients"])
+            img = stats[split_name][label]["images"]
+            cells[split_name] = f"{pat} ({img})"
+            totals[split_name][0] += pat
+            totals[split_name][1] += img
+            total_pat += pat
+            total_img += img
+
+        rows.append(
+            [
+                subtype,
+                cells["Train"],
+                cells["Val"],
+                cells["Test"],
+                f"{total_pat} ({total_img})",
+            ]
+        )
+
+    # Grand total row
+    grand_pat = sum(v[0] for v in totals.values())
+    grand_img = sum(v[1] for v in totals.values())
+    rows.append(
+        [
+            "Total",
+            f"{totals['Train'][0]} ({totals['Train'][1]})",
+            f"{totals['Val'][0]} ({totals['Val'][1]})",
+            f"{totals['Test'][0]} ({totals['Test'][1]})",
+            f"{grand_pat} ({grand_img})",
+        ]
+    )
+
+    return headers, rows
+
+
 def main():
     """Main entry point for dataset statistics."""
+    parser = argparse.ArgumentParser(description="MPN Dataset Statistics")
+    parser.add_argument(
+        "--features_dir",
+        type=str,
+        default=None,
+        help="Explicit path to the features directory for split calculation.",
+    )
+    args = parser.parse_args()
+
     print("\n" + "=" * 70)
     print("MPN Dataset Statistics".center(70))
     print("=" * 70)
@@ -237,6 +348,45 @@ def main():
         )
 
     print_table("H&E Subtype Classification (ET, PV, PMF)", headers, rows)
+
+    # ==================================================================
+    # 1b. Actual Train/Val/Test Split (from train_mil.py)
+    # ==================================================================
+    features_dir = None
+
+    if args.features_dir:
+        candidate = Path(args.features_dir)
+        if candidate.exists() and candidate.is_dir():
+            features_dir = candidate
+        else:
+            print(
+                f"\n  ⚠️  Specified features directory '{args.features_dir}' not found. Skipping split statistics."
+            )
+    else:
+        data_root = Path("data")
+        if data_root.exists():
+            feature_dirs = sorted(
+                [
+                    d
+                    for d in data_root.iterdir()
+                    if d.is_dir() and d.name.startswith("features_")
+                ]
+            )
+            if feature_dirs:
+                features_dir = feature_dirs[0]
+
+    if features_dir is not None:
+        print(f"\n  ℹ️  Using '{features_dir}' as reference for split statistics.")
+        split_headers, split_rows = calculate_actual_split(features_dir, seed=42)
+        print_table(
+            f"ACTUAL Data Split (Sourced from train_mil.py, Seed=42, Ref: {features_dir.name})",
+            split_headers,
+            split_rows,
+        )
+    elif not args.features_dir:
+        print(
+            "\n  ⚠️  No 'features_*' directories found in data/. Skipping split statistics."
+        )
 
     # ==================================================================
     # 2. Raw Data Analysis - Reticulin Images (Fibrosis Grading)

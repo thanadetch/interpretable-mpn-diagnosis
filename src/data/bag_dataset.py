@@ -96,23 +96,39 @@ class MPNBagDatasetFull(Dataset):
     def __len__(self) -> int:
         return len(self.samples)
 
-    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, int, str]:
+    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, int, str, dict]:
         """
         Returns:
             features: Full patch features [N_patches, Dim].
             label:    Integer class label.
             slide_id: Slide identifier (filename without extension).
+            metrics:  Dict of patch-level metrics (from extraction).
         """
         pt_path, label = self.samples[idx]
-        feat = torch.load(pt_path, map_location="cpu", weights_only=True)
+
+        # Must be False to allow loading lists of strings (patch_paths)
+        data = torch.load(pt_path, map_location="cpu", weights_only=False)
+
+        if isinstance(data, dict):
+            feat = data.get("feats", data.get("features"))
+            metrics = data.get("metrics", {})
+        else:
+            feat = data
+            metrics = {}
 
         # Optionally limit number of patches
         if self.max_patches is not None and feat.size(0) > self.max_patches:
-            indices = torch.randperm(feat.size(0))[:self.max_patches]
+            indices = torch.randperm(feat.size(0))[: self.max_patches]
             feat = feat[indices]
+            # Slice metrics tensors to match features
+            if metrics:
+                metrics = {
+                    k: v[indices] if isinstance(v, torch.Tensor) else v
+                    for k, v in metrics.items()
+                }
 
         slide_id = pt_path.stem
-        return feat, label, slide_id
+        return feat, label, slide_id, metrics
 
     def get_labels(self) -> List[int]:
         """Return all labels (useful for stratified splitting / weighted sampling)."""
@@ -121,4 +137,3 @@ class MPNBagDatasetFull(Dataset):
     def get_slide_path(self, idx: int) -> Path:
         """Return the path to the .pt file for a given index."""
         return self.samples[idx][0]
-

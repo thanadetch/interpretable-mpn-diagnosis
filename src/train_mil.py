@@ -157,7 +157,10 @@ def collate_bags(batch):
     features_list = [item[0] for item in batch]
     labels = torch.tensor([item[1] for item in batch])
     slide_ids = [item[2] for item in batch]
-    return features_list, labels, slide_ids
+    metrics_list = (
+        [item[3] for item in batch] if len(batch[0]) > 3 else [{} for _ in batch]
+    )
+    return features_list, labels, slide_ids, metrics_list
 
 
 # ── training ─────────────────────────────────────────────────────────────
@@ -172,6 +175,7 @@ def train_one_epoch(
     instance_weight: float = 0.2,
     bag_weight: float = 0.7,
     inst_weight: float = 0.3,
+    attention_bias: bool = False,
 ) -> Tuple[float, float, float, List[float], float, dict]:
     """Train for one epoch. Handles 'simple', 'dtfd', and 'clam_sb' model types."""
     model.train()
@@ -183,7 +187,7 @@ def train_one_epoch(
     all_labels = []
 
     pbar = tqdm(loader, desc="  Train", leave=False)
-    for features_list, labels, slide_ids in pbar:
+    for features_list, labels, slide_ids, metrics_list in pbar:
         labels = labels.to(device)
         batch_loss = torch.tensor(0.0, device=device, requires_grad=True)
         batch_correct = 0
@@ -216,8 +220,14 @@ def train_one_epoch(
                 loss = bag_weight * bag_loss + inst_weight * inst_loss
                 loss_sums["bag_loss"] += bag_loss.item()
                 loss_sums["inst_loss"] += inst_loss.item()
+            elif model_type == "simple":
+                metrics = metrics_list[i] if attention_bias else None
+                logits, _, _ = model(features, metrics=metrics)
+                label_tensor = torch.tensor([label], device=device)
+                loss = criterion(logits.unsqueeze(0), label_tensor)
+                loss_sums["bag_loss"] += loss.item()
             else:
-                # Simple MIL: standard forward
+                # Other MIL models: standard forward
                 logits, _, _ = model(features)
                 label_tensor = torch.tensor([label], device=device)
                 loss = criterion(logits.unsqueeze(0), label_tensor)
@@ -282,6 +292,7 @@ def validate_and_evaluate(
     criterion: nn.Module,
     device: torch.device,
     desc: str = "  Val  ",
+    attention_bias: bool = False,
 ) -> Tuple[float, float, float, List[float], float, str, str]:
     """
     Validate/Test a MIL model and return metric strings.
@@ -302,14 +313,21 @@ def validate_and_evaluate(
     all_preds = []
     all_labels = []
 
-    for features_list, labels, slide_ids in tqdm(loader, desc=desc, leave=False):
+    for features_list, labels, slide_ids, metrics_list in tqdm(
+        loader, desc=desc, leave=False
+    ):
         labels = labels.to(device)
 
         for i, features in enumerate(features_list):
             features = features.to(device)
             label = labels[i : i + 1]
+            metrics = metrics_list[i] if attention_bias else None
 
-            logits, _, _ = model(features)
+            if isinstance(model, SimpleGatedMIL):
+                logits, _, _ = model(features, return_attention=False, metrics=metrics)
+            else:
+                logits, _, _ = model(features)
+
             logits = logits.unsqueeze(0)
 
             loss = criterion(logits, label)
@@ -459,6 +477,13 @@ def parse_args() -> argparse.Namespace:
         help="String to append to experiment directory, model checkpoint, and log file names.",
     )
 
+    # Attention logit bias (ablation)
+    parser.add_argument(
+        "--attention_bias",
+        action="store_true",
+        help="Enable attention logit bias using extracted metrics (for SimpleGatedMIL ablation).",
+    )
+
     return parser.parse_args()
 
 
@@ -474,6 +499,8 @@ def main() -> None:
     run_name = f"{args.model_type}_{args.backbone}"
     if args.model_type == "simple" and args.topk > 0:
         run_name += f"_topk{args.topk}"
+    if args.model_type == "simple" and args.attention_bias:
+        run_name += "_bias"
     if args.postfix:
         run_name += f"_{args.postfix}"
 
@@ -512,6 +539,27 @@ def main() -> None:
         f"  Split -- Train: {len(train_idx)} | Val: {len(val_idx)} | Test: {len(test_idx)}",
         log_file,
     )
+
+    log("  Detailed Breakdown (Patients / Bags):", log_file)
+    splits = {"Train": train_idx, "Val": val_idx, "Test": test_idx}
+    for split_name, indices in splits.items():
+        stats = {
+            label: {"patients": set(), "bags": 0} for label in range(len(CLASS_NAMES))
+        }
+        for idx in indices:
+            pt_path, label = full_dataset.samples[idx]
+            patient_id = pt_path.parent.name
+            stats[label]["patients"].add(patient_id)
+            stats[label]["bags"] += 1
+
+        parts = []
+        for label in range(len(CLASS_NAMES)):
+            subtype = CLASS_NAMES[label]
+            n_pat = len(stats[label]["patients"])
+            n_bags = stats[label]["bags"]
+            parts.append(f"{subtype}: {n_pat:2d} ({n_bags:3d})")
+
+        log(f"    {split_name:<5} : " + " | ".join(parts), log_file)
 
     train_loader = DataLoader(
         Subset(full_dataset, train_idx),
@@ -641,6 +689,7 @@ def main() -> None:
             instance_weight=args.instance_weight,
             bag_weight=args.bag_weight,
             inst_weight=args.inst_weight,
+            attention_bias=args.attention_bias,
         )
 
         # Validate
@@ -657,6 +706,7 @@ def main() -> None:
             val_loader,
             criterion,
             device,
+            attention_bias=args.attention_bias,
         )
 
         # Per-epoch logging (2-line table)
@@ -726,6 +776,7 @@ def main() -> None:
             criterion,
             device,
             desc="  Test ",
+            attention_bias=args.attention_bias,
         )
 
         log(f"\n{test_cm_str}", log_file)

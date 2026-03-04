@@ -98,6 +98,6 @@
 
 
 `python src/tools/analyze_shortcuts.py \
-        --mil_checkpoint experiments/simple_virchow2_20260301_160636/best_simple_virchow2.pth \
+        --mil_checkpoint experiments/simple_virchow2_attention_bias_bad_20260303_172213/best_simple_virchow2.pth \
         --patches_dir data/processed_subtype \
         --split val`

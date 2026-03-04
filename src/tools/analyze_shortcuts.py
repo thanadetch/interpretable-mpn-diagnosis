@@ -235,7 +235,8 @@ def load_mil_model(checkpoint_path: Path, device: torch.device):
     num_classes = len(CLASS_MAP)
 
     if model_type == "simple":
-        model = SimpleGatedMIL(input_dim=input_dim, num_classes=num_classes)
+        topk = ckpt_args.get("topk", 0)
+        model = SimpleGatedMIL(input_dim=input_dim, num_classes=num_classes, topk=topk)
     else:
         model = HybridMIL(input_dim=input_dim, num_classes=num_classes)
 
@@ -550,10 +551,27 @@ def main():
 
                 # Get MIL Attention
                 with torch.inference_mode():
-                    features = torch.load(feature_path, map_location=device)
-                    logits, attention, _ = model(
-                        features.to(device), return_attention=True
+                    data = torch.load(
+                        feature_path, map_location=device, weights_only=False
                     )
+
+                    if isinstance(data, dict):
+                        features = data.get("feats", data.get("features")).to(device)
+                        metrics = {
+                            k: v.to(device) if isinstance(v, torch.Tensor) else v
+                            for k, v in data.get("metrics", {}).items()
+                        }
+                    else:
+                        features = data.to(device)
+                        metrics = {}
+
+                    if ckpt_args.get("model_type", "simple") == "simple":
+                        logits, attention, _ = model(
+                            features, return_attention=True, metrics=metrics
+                        )
+                    else:
+                        logits, attention, _ = model(features, return_attention=True)
+
                     pred_class = CLASS_NAMES[logits.argmax().item()]
                     attention = attention.cpu().numpy().flatten()
 

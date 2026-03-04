@@ -64,11 +64,13 @@ class SimpleGatedMIL(nn.Module):
         self,
         features: torch.Tensor,
         return_attention: bool = False,
+        metrics: Optional[dict] = None,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], None]:
         """
         Args:
             features: Instance features [N, D].
             return_attention: Whether to return attention weights.
+            metrics: Optional dict of patch-level metrics (for logit bias).
 
         Returns:
             logits: Bag-level logits [C].
@@ -82,6 +84,15 @@ class SimpleGatedMIL(nn.Module):
         V = self.attention_V(h)  # [N, hidden_dim]
         U = self.attention_U(h)  # [N, hidden_dim]
         attn_scores = self.attention_W(V * U).squeeze(-1)  # [N]
+
+        # --- Attention Logit Bias (1.1) ---
+        if metrics is not None and "bad" in metrics:
+            bad = metrics["bad"].to(attn_scores.device).float()
+            bad = torch.clamp(bad, 0.0, 1.0)
+            p_good = torch.clamp(1.0 - bad, min=1e-6, max=1.0)
+            attn_scores = attn_scores + torch.log(p_good)
+        # ----------------------------------
+
         attention = F.softmax(attn_scores, dim=0)  # [N]
 
         # Aggregation

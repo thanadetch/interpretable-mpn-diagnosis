@@ -26,6 +26,9 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Dict, List, Tuple
 
+import cv2
+import numpy as np
+
 # Ensure src/ is on sys.path when running directly (e.g., python src/tools/extract_uni2.py)
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -97,6 +100,60 @@ def group_patches_by_image(
 
 
 # =============================================================================
+# Patch-Level Metric Helpers (matches analyze_shortcuts.py CV2 logic)
+# =============================================================================
+
+
+def tissue_fraction_from_rgb(
+    patch_rgb_uint8: np.ndarray, tissue_thr: float = 0.05
+) -> float:
+    img = np.clip(patch_rgb_uint8.astype(np.float32), 1.0, 255.0)
+    od = -np.log10(img / 255.0)
+    mean_od = od.mean(axis=2)
+    return float((mean_od > tissue_thr).mean())
+
+
+def space_bg_fractions_from_rgb(patch_rgb_uint8: np.ndarray) -> Tuple[float, float]:
+    v_thr, s_thr = 0.90, 0.15
+    min_comp_area = 80
+    H, W, _ = patch_rgb_uint8.shape
+    max_comp_area = int(0.35 * H * W)
+
+    hsv = cv2.cvtColor(patch_rgb_uint8, cv2.COLOR_RGB2HSV).astype(np.float32)
+    S = hsv[..., 1] / 255.0
+    V = hsv[..., 2] / 255.0
+
+    white = (V > v_thr) & (S < s_thr)
+    white_u8 = white.astype(np.uint8) * 255
+    n, labels, stats, _ = cv2.connectedComponentsWithStats(white_u8, connectivity=8)
+
+    border = np.zeros((H, W), dtype=bool)
+    border[0, :] = True
+    border[-1, :] = True
+    border[:, 0] = True
+    border[:, -1] = True
+
+    outside_white = np.zeros((H, W), dtype=bool)
+    internal_white = np.zeros((H, W), dtype=bool)
+
+    for lab in range(1, n):
+        area = stats[lab, cv2.CC_STAT_AREA]
+        comp = labels == lab
+
+        if (comp & border).any():
+            if area >= min_comp_area:
+                outside_white |= comp
+        else:
+            if area < min_comp_area or area > max_comp_area:
+                continue
+            internal_white |= comp
+
+    bg_blank_frac = float(outside_white.mean())
+    space_frac = float(internal_white.mean())
+    return space_frac, bg_blank_frac
+
+
+# =============================================================================
 # Patch Dataset (for batched feature extraction)
 # =============================================================================
 
@@ -120,9 +177,38 @@ class PatchDataset(Dataset):
     def __len__(self) -> int:
         return len(self.patch_paths)
 
-    def __getitem__(self, idx: int) -> torch.Tensor:
-        img = Image.open(self.patch_paths[idx]).convert("RGB")
-        return self.transform(img)  # [3, 224, 224]
+    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, Dict[str, float]]:
+        patch_path = self.patch_paths[idx]
+        img = Image.open(patch_path).convert("RGB")
+        tensor = self.transform(img)
+
+        # 1. Parse row and col
+        match = re.search(r"_r(\d+)c(\d+)\.png$", patch_path.name)
+        row = int(match.group(1)) if match else -1
+        col = int(match.group(2)) if match else -1
+
+        # 2. Calculate metrics
+        img_array = np.array(img, dtype=np.uint8)
+        tissue = tissue_fraction_from_rgb(img_array)
+        space, bg = space_bg_fractions_from_rgb(img_array)
+
+        # 3. Pre-compute the 'bad' score for Logit Bias
+        eps = 1e-6
+        r_ratio = space / (tissue + eps)
+        # sigmoid equivalent: 1 / (1 + exp(-x))
+        bad_bg = 1.0 / (1.0 + np.exp(-((bg - 0.2) / 0.15)))
+        bad_space = 1.0 / (1.0 + np.exp(-((r_ratio - 0.8) / 0.15)))
+        bad = float(np.clip(bad_bg + bad_space, 0.0, 1.0))
+
+        metrics = {
+            "bg": float(bg),
+            "tissue": float(tissue),
+            "space": float(space),
+            "bad": float(bad),
+            "row": int(row),
+            "col": int(col),
+        }
+        return tensor, metrics
 
 
 # =============================================================================
@@ -137,7 +223,7 @@ def extract_features_for_image(
     transform,
     batch_size: int,
     device: torch.device,
-) -> torch.Tensor:
+) -> Tuple[torch.Tensor, Dict[str, torch.Tensor], torch.Tensor]:
     """
     Extract UNI2-h [CLS] features for all patches in one image group.
 
@@ -149,7 +235,7 @@ def extract_features_for_image(
         device:      Device to run inference on.
 
     Returns:
-        Stacked feature tensor of shape [N_patches, 1536].
+        Tuple of (features [N_patches, 1536], metrics dict, rc [N, 2] int32).
     """
     dataset = PatchDataset(patch_paths, transform)
     loader = DataLoader(
@@ -162,16 +248,39 @@ def extract_features_for_image(
 
     use_amp = device.type == "cuda"
     all_features = []
-    for batch in loader:
-        batch = batch.to(device)
+    all_metrics = {"bg": [], "tissue": [], "space": [], "bad": [], "row": [], "col": []}
+
+    for batch_tensor, batch_metrics in loader:
+        batch_tensor = batch_tensor.to(device)
         with torch.autocast(device.type, torch.float16, enabled=use_amp):
-            output = model(batch)  # [B, 1536]
+            output = model(batch_tensor)  # [B, 1536]
 
         # UNI2-h returns [CLS] token directly as [B, 1536]
         # Move to float32 on CPU to avoid half-precision save issues
         all_features.append(output.float().cpu())
+        for key in all_metrics:
+            all_metrics[key].append(batch_metrics[key].cpu())
 
-    return torch.cat(all_features, dim=0)  # [N, 1536]
+    concatenated_features = torch.cat(all_features, dim=0)  # [N, 1536]
+
+    # Float metrics
+    concatenated_metrics = {
+        "bg": torch.cat(all_metrics["bg"], dim=0).float(),
+        "tissue": torch.cat(all_metrics["tissue"], dim=0).float(),
+        "space": torch.cat(all_metrics["space"], dim=0).float(),
+        "bad": torch.cat(all_metrics["bad"], dim=0).float(),
+    }
+
+    # Integer coordinates tensor [N, 2]
+    rc_tensor = torch.stack(
+        [
+            torch.cat(all_metrics["row"], dim=0),
+            torch.cat(all_metrics["col"], dim=0),
+        ],
+        dim=1,
+    ).to(torch.int32)
+
+    return concatenated_features, concatenated_metrics, rc_tensor
 
 
 # =============================================================================
@@ -308,7 +417,7 @@ def run_extraction(args: argparse.Namespace) -> None:
             patches = groups[img_id]
             patch_paths = [p[0] for p in patches]  # Extract only paths
 
-            features = extract_features_for_image(
+            features, metrics, rc_tensor = extract_features_for_image(
                 patch_paths=patch_paths,
                 model=model,
                 transform=transform,
@@ -316,7 +425,19 @@ def run_extraction(args: argparse.Namespace) -> None:
                 device=device,
             )
 
-            torch.save(features, out_path)
+            # Convert paths to string for saving
+            patch_paths_str = [str(p) for p in patch_paths]
+
+            # Save the final standardized dictionary
+            torch.save(
+                {
+                    "feats": features,
+                    "metrics": metrics,
+                    "rc": rc_tensor,
+                    "patch_paths": patch_paths_str,
+                },
+                out_path,
+            )
             processed += 1
 
     # ------------------------------------------------------------------
