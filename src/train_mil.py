@@ -40,6 +40,7 @@ from core.config import CLASS_MAP, CLASS_MAP_INV, EXPERIMENTS_DIR, SEED
 from data.bag_dataset import MPNBagDatasetFull
 from models.clam import CLAM_SB
 from models.dtfd_mil import DTFDMIL, compute_dtfd_loss
+from models.dual_stream_mil import DualStreamMIL
 from models.hybrid_mil import HybridMIL
 from models.simple_mil import SimpleGatedMIL
 
@@ -221,7 +222,7 @@ def train_one_epoch(
                 loss = bag_weight * bag_loss + inst_weight * inst_loss
                 loss_sums["bag_loss"] += bag_loss.item()
                 loss_sums["inst_loss"] += inst_loss.item()
-            elif model_type == "simple":
+            elif model_type in ("simple", "dual_stream"):
                 metrics = metrics_list[i] if attention_bias else None
                 logits, _, _ = model(features, metrics=metrics)
                 label_tensor = torch.tensor([label], device=device)
@@ -324,7 +325,7 @@ def validate_and_evaluate(
             label = labels[i : i + 1]
             metrics = metrics_list[i] if attention_bias else None
 
-            if isinstance(model, SimpleGatedMIL):
+            if isinstance(model, (SimpleGatedMIL, DualStreamMIL)):
                 logits, _, _ = model(features, return_attention=False, metrics=metrics)
             else:
                 logits, _, _ = model(features)
@@ -408,8 +409,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--model_type",
         default="simple",
-        choices=["simple", "dtfd", "clam_sb", "hybrid"],
-        help="MIL model type: 'simple' | 'dtfd' | 'clam_sb' | 'hybrid'. Default: simple.",
+        choices=["simple", "dtfd", "clam_sb", "hybrid", "dual_stream"],
+        help="MIL model type: 'simple' | 'dtfd' | 'clam_sb' | 'hybrid' | 'dual_stream'. Default: simple.",
     )
     parser.add_argument(
         "--data_root",
@@ -479,6 +480,14 @@ def parse_args() -> argparse.Namespace:
         help="Enable attention logit bias using extracted metrics (for SimpleGatedMIL ablation).",
     )
 
+    # DualStreamMIL: fixed gamma diagnostic
+    parser.add_argument(
+        "--fixed_gamma",
+        type=float,
+        default=None,
+        help="Fix DualStream gamma to a constant (e.g. 0.2, 0.5). Omit for learnable gamma.",
+    )
+
     return parser.parse_args()
 
 
@@ -494,8 +503,10 @@ def main() -> None:
     run_name = f"{args.model_type}_{args.backbone}"
     if args.model_type == "simple" and args.topk > 0:
         run_name += f"_topk{args.topk}"
-    if args.model_type == "simple" and args.attention_bias:
+    if args.model_type in ("simple", "dual_stream") and args.attention_bias:
         run_name += "_bias"
+    if args.model_type == "dual_stream" and args.fixed_gamma is not None:
+        run_name += f"_g{args.fixed_gamma}"
     if args.postfix:
         run_name += f"_{args.postfix}"
 
@@ -590,6 +601,12 @@ def main() -> None:
             num_classes=num_classes,
             topk=args.topk,
         ).to(device)
+    elif args.model_type == "dual_stream":
+        model = DualStreamMIL(
+            input_dim=input_dim,
+            num_classes=num_classes,
+            fixed_gamma=args.fixed_gamma,
+        ).to(device)
     elif args.model_type == "clam_sb":
         model = CLAM_SB(
             input_dim=input_dim,
@@ -622,7 +639,7 @@ def main() -> None:
     # PV gets the highest weight to penalize missing it (improve recall)
     class_weights = torch.tensor([1.5, 3.5, 1.0], device=device)
 
-    if args.model_type == "simple":
+    if args.model_type in ("simple", "dual_stream"):
         criterion = nn.CrossEntropyLoss(weight=class_weights, label_smoothing=0.1)
         optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=0.01)
     else:
@@ -716,6 +733,12 @@ def main() -> None:
             f"| {val_f1:<5.3f} | {val_macro_recall:<5.3f} | {fmt_recall(val_recall)}",
             log_file,
         )
+        if args.model_type == "dual_stream":
+            if model.gamma_param is not None:
+                gamma_val = torch.sigmoid(model.gamma_param).item()
+                log(f"       -> DualStream Gamma: {gamma_val:.4f} (learnable)", log_file)
+            else:
+                log(f"       -> DualStream Gamma: {model.gamma.item():.4f} (fixed)", log_file)
         log(sep, log_file)
 
         scheduler.step()
