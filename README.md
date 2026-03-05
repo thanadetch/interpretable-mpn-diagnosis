@@ -93,8 +93,8 @@
     --split test`
 
 `python -m src.tools.visualize_heatmap_set \
-    --mil_checkpoint experiments/simple_virchow2_20260301_160636/best_simple_virchow2.pth \
-    --split test --postfix crop_od`
+    --mil_checkpoint experiments/simple_virchow2_20260304_103904/best_simple_virchow2.pth \
+    --split test`
 
 
 `python src/tools/analyze_shortcuts.py \

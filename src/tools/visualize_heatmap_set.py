@@ -328,7 +328,7 @@ def load_mil_model(
         model_type: 'simple' or 'hybrid'.
         backbone_name: 'titan', 'uni2', or 'virchow2'.
     """
-    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=True)
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     args = checkpoint["args"]
     model_type = args["model_type"]
     backbone_name = args["backbone"]
@@ -372,24 +372,43 @@ def compute_mil_attention(
     features_path: Path,
     mil_model: nn.Module,
     device: torch.device,
+    ckpt_args: Optional[dict] = None,
 ) -> Tuple[np.ndarray, int, np.ndarray]:
     """
     Compute MIL attention scores for all patches in a bag.
 
     Args:
-        features_path: Path to .pt file with [N, D] features.
+        features_path: Path to .pt file with [N, D] features (tensor or dict).
         mil_model: Trained MIL model.
         device: Torch device.
+        ckpt_args: Checkpoint args dict (to check attention_bias flag).
 
     Returns:
         attention: MIL attention weights [N], normalized to [0, 1].
         pred_class: Predicted class index.
         probs: Class probabilities [C].
     """
-    features = torch.load(features_path, map_location=device, weights_only=True)
-    features = features.to(device)
+    data = torch.load(features_path, map_location=device, weights_only=False)
 
-    logits, attention, _ = mil_model(features, return_attention=True)
+    if isinstance(data, dict):
+        features = data["feats"].to(device)
+        metrics = {
+            k: v.to(device) if isinstance(v, torch.Tensor) else v
+            for k, v in data.get("metrics", {}).items()
+        }
+    else:
+        features = data.to(device)
+        metrics = {}
+
+    # Only pass metrics if the model was trained with --attention_bias
+    use_bias = (ckpt_args or {}).get("attention_bias", False)
+    if isinstance(mil_model, SimpleGatedMIL):
+        logits, attention, _ = mil_model(
+            features, return_attention=True, metrics=metrics if use_bias else None
+        )
+    else:
+        logits, attention, _ = mil_model(features, return_attention=True)
+
     probs = F.softmax(logits, dim=0).cpu().numpy()
     pred_class = logits.argmax().item()
 
@@ -482,6 +501,7 @@ def generate_grid_gallery(
     patch_size: int = 224,
     n_cols: int = 8,
     device: torch.device = torch.device("cpu"),
+    ckpt_args: Optional[dict] = None,
 ) -> None:
     """
     Generate a single grid gallery image with all patches sorted by MIL attention.
@@ -512,7 +532,7 @@ def generate_grid_gallery(
 
     # ── 2. Compute MIL attention ────────────────────────────────────
     mil_attention, pred_class, probs = compute_mil_attention(
-        features_path, mil_model, device
+        features_path, mil_model, device, ckpt_args=ckpt_args
     )
     pred_name = CLASS_NAMES[pred_class]
     prob_str = " | ".join(f"{CLASS_NAMES[i]}: {p:.3f}" for i, p in enumerate(probs))
@@ -799,8 +819,7 @@ def main() -> None:
     print(f"  Device:      {device}")
 
     # Initialise dataset and discover target patients
-    max_patches = ckpt_args.get("max_patches", None)
-    dataset = MPNBagDatasetFull(features_dir, max_patches=max_patches)
+    dataset = MPNBagDatasetFull(features_dir)
     patients = get_target_patients(
         dataset, checkpoint, ckpt_args, args.split, args.seed
     )
@@ -889,6 +908,7 @@ def main() -> None:
                 patch_size=args.patch_size,
                 n_cols=args.n_cols,
                 device=device,
+                ckpt_args=ckpt_args,
             )
             total_images += 1
 

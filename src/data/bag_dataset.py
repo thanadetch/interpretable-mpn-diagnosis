@@ -52,7 +52,11 @@ class MPNBagDataset(Dataset):
             label:   Integer class label.
         """
         pt_path, label = self.samples[idx]
-        feat = torch.load(pt_path, map_location="cpu", weights_only=True)
+        data = torch.load(pt_path, map_location="cpu", weights_only=False)
+        if isinstance(data, dict):
+            feat = data["feats"]
+        else:
+            feat = data
         # Mean pooling: [N_patches, Dim] -> [Dim]
         feat = feat.mean(dim=0)
         return feat, label
@@ -74,8 +78,6 @@ class MPNBagDatasetFull(Dataset):
 
     Args:
         features_dir: Root directory containing per-class feature folders.
-        max_patches: Optional maximum number of patches per bag (for memory).
-                     If a bag has more patches, randomly samples this many.
     """
 
     def __init__(
@@ -108,7 +110,7 @@ class MPNBagDatasetFull(Dataset):
         data = torch.load(pt_path, map_location="cpu", weights_only=False)
 
         if isinstance(data, dict):
-            feat = data.get("feats", data.get("features"))
+            feat = data["feats"]
             metrics = data.get("metrics", {})
         else:
             feat = data

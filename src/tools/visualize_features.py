@@ -86,7 +86,11 @@ def visualize_tsne(
         counts[class_name] = len(pt_files)
 
         for pt_file in pt_files:
-            feat = torch.load(pt_file, map_location="cpu", weights_only=True)
+            data = torch.load(pt_file, map_location="cpu", weights_only=False)
+            if isinstance(data, dict):
+                feat = data["feats"]
+            else:
+                feat = data
             # Mean pooling: [N_patches, Dim] -> [Dim]
             feat_mean = feat.mean(dim=0).numpy()
             features.append(feat_mean)

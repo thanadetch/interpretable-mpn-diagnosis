@@ -85,13 +85,17 @@ class SimpleGatedMIL(nn.Module):
         U = self.attention_U(h)  # [N, hidden_dim]
         attn_scores = self.attention_W(V * U).squeeze(-1)  # [N]
 
-        # --- Attention Logit Bias (1.1) ---
-        if metrics is not None and "bad" in metrics:
-            bad = metrics["bad"].to(attn_scores.device).float()
-            bad = torch.clamp(bad, 0.0, 1.0)
-            p_good = torch.clamp(1.0 - bad, min=1e-6, max=1.0)
-            attn_scores = attn_scores + torch.log(p_good)
-        # ----------------------------------
+        # --- Attention Logit Bias (gentle bg-only soft prior) ---
+        if metrics is not None and "bg" in metrics:
+            bg = metrics["bg"].to(attn_scores.device).float()
+            bg = torch.clamp(bg, 0.0, 1.0)
+
+            bg0, tau, beta, lam = 0.60, 0.10, 0.20, 0.60
+            bad_bg = torch.sigmoid((bg - bg0) / tau)
+            p_good = beta + (1.0 - beta) * (1.0 - bad_bg)
+            bias = torch.log(p_good).clamp(min=-2.0)
+            attn_scores = attn_scores + lam * bias
+        # -------------------------------------------------------
 
         attention = F.softmax(attn_scores, dim=0)  # [N]
 

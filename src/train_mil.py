@@ -754,7 +754,7 @@ def main() -> None:
     best_ckpt_path = exp_dir / checkpoint_name
     if best_ckpt_path.exists():
         log(f"Loading best checkpoint from: {best_ckpt_path}", log_file)
-        checkpoint = torch.load(best_ckpt_path, map_location=device, weights_only=True)
+        checkpoint = torch.load(best_ckpt_path, map_location=device, weights_only=False)
         model.load_state_dict(checkpoint["model_state_dict"])
 
         (

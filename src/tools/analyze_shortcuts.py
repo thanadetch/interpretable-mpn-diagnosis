@@ -549,7 +549,7 @@ def main():
             data = torch.load(feature_path, map_location=device, weights_only=False)
 
             if isinstance(data, dict):
-                features = data.get("feats", data.get("features")).to(device)
+                features = data["feats"].to(device)
                 metrics = {
                     k: v.to(device) if isinstance(v, torch.Tensor) else v
                     for k, v in data.get("metrics", {}).items()
