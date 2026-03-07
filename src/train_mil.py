@@ -40,7 +40,9 @@ from core.config import CLASS_MAP, CLASS_MAP_INV, EXPERIMENTS_DIR, SEED
 from data.bag_dataset import MPNBagDatasetFull
 from models.clam import CLAM_SB
 from models.dtfd_mil import DTFDMIL, compute_dtfd_loss
+from models.explicit_mil import ExplicitMetricsMIL
 from models.hybrid_mil import HybridMIL
+from models.residual_metric_mil import ResidualMetricMIL
 from models.simple_mil import SimpleGatedMIL
 
 # ── backbone configuration ───────────────────────────────────────────────
@@ -221,8 +223,8 @@ def train_one_epoch(
                 loss = bag_weight * bag_loss + inst_weight * inst_loss
                 loss_sums["bag_loss"] += bag_loss.item()
                 loss_sums["inst_loss"] += inst_loss.item()
-            elif model_type == "simple":
-                metrics = metrics_list[i] if attention_bias else None
+            elif model_type in ("simple", "explicit", "residual_metric"):
+                metrics = metrics_list[i] if (attention_bias or model_type in ("explicit", "residual_metric")) else None
                 logits, _, _ = model(features, metrics=metrics)
                 label_tensor = torch.tensor([label], device=device)
                 loss = criterion(logits.unsqueeze(0), label_tensor)
@@ -322,9 +324,9 @@ def validate_and_evaluate(
         for i, features in enumerate(features_list):
             features = features.to(device)
             label = labels[i : i + 1]
-            metrics = metrics_list[i] if attention_bias else None
+            metrics = metrics_list[i] if (attention_bias or isinstance(model, (ExplicitMetricsMIL, ResidualMetricMIL))) else None
 
-            if isinstance(model, SimpleGatedMIL):
+            if isinstance(model, (SimpleGatedMIL, ExplicitMetricsMIL, ResidualMetricMIL)):
                 logits, _, _ = model(features, return_attention=False, metrics=metrics)
             else:
                 logits, _, _ = model(features)
@@ -408,8 +410,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--model_type",
         default="simple",
-        choices=["simple", "dtfd", "clam_sb", "hybrid"],
-        help="MIL model type: 'simple' | 'dtfd' | 'clam_sb' | 'hybrid'. Default: simple.",
+        choices=["simple", "dtfd", "clam_sb", "hybrid", "explicit", "residual_metric"],
+        help="MIL model type: 'simple' | 'dtfd' | 'clam_sb' | 'hybrid' | 'explicit' | 'residual_metric'. Default: simple.",
     )
     parser.add_argument(
         "--data_root",
@@ -595,12 +597,22 @@ def main() -> None:
             input_dim=input_dim,
             num_classes=num_classes,
         ).to(device)
+    elif args.model_type == "explicit":
+        model = ExplicitMetricsMIL(
+            input_dim=input_dim,
+            num_classes=num_classes,
+        ).to(device)
     elif args.model_type == "hybrid":
         k = args.topk if args.topk > 0 else 5
         model = HybridMIL(
             input_dim=input_dim,
             num_classes=num_classes,
             topk=k,
+        ).to(device)
+    elif args.model_type == "residual_metric":
+        model = ResidualMetricMIL(
+            input_dim=input_dim,
+            num_classes=num_classes,
         ).to(device)
     else:
         model = DTFDMIL(
@@ -622,12 +634,8 @@ def main() -> None:
     # PV gets the highest weight to penalize missing it (improve recall)
     class_weights = torch.tensor([1.5, 3.5, 1.0], device=device)
 
-    if args.model_type == "simple":
-        criterion = nn.CrossEntropyLoss(weight=class_weights, label_smoothing=0.1)
-        optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=0.01)
-    else:
-        criterion = nn.CrossEntropyLoss(weight=class_weights)
-        optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=0.01)
+    criterion = nn.CrossEntropyLoss(weight=class_weights, label_smoothing=0.1)
+    optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=0.01)
 
     scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=1e-6)
 
