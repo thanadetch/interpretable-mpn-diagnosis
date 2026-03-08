@@ -86,7 +86,7 @@
 
 `python src/train_slide_encoder.py --features_dir data/features_titan --epochs 50 --lr 1e-4 --seed 42`
 
-`python src/tools/visualize_features.py --backbone titan`
+`python src/tools/visualize_features.py --features_dir data/features_uni2 --output_dir results/feature_eval_edge_crop_od/uni2 `
 
 `python -m src.tools.visualize_heatmap_set \
     --mil_checkpoint experiments/simple_virchow2_20260301_160636/best_simple_virchow2.pth \
