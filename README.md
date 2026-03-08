@@ -101,3 +101,15 @@
         --mil_checkpoint experiments/simple_virchow2_bias_20260304_104414/best_simple_virchow2_bias.pth \
         --patches_dir data/processed_subtype \
         --split val`
+
+`python src/eval_hierarchical_fusion.py \
+  --ckpt_stage1 experiments/pmf_vs_nonpmf_simple_titan_20260308_112116/best_pmf_vs_nonpmf_simple_titan.pth \
+  --ckpt_stage2 experiments/et_vs_pv_simple_titan_topk10_20260308_115045/best_et_vs_pv_simple_titan_topk10.pth \
+  --save_csv`
+
+`python src/eval_hierarchical_fusion.py \
+  --backbone titan \
+  --data_root data \
+  --ckpt_stage1 experiments/pmf_vs_nonpmf_simple_titan_20260308_112116/best_pmf_vs_nonpmf_simple_titan.pth \
+  --ckpt_stage2 experiments/et_vs_pv_simple_titan_20260308_085425/best_et_vs_pv_simple_titan.pth \
+  --save_csv`
