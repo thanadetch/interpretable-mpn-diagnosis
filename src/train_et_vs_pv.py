@@ -510,8 +510,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--early_stop_patience",
         type=int,
-        default=10,
-        help="Stop training after this many epochs without val macro recall improvement (default: 10).",
+        default=15,
+        help="Stop training after this many epochs without val macro recall improvement (default: 15).",
     )
 
     return parser.parse_args()
@@ -601,10 +601,38 @@ def main() -> None:
 
         log(f"    {split_name:<5} : " + " | ".join(parts), log_file)
 
+    # ── Patient-balanced sampling ─────────────────────────────────────
+    patient_to_label = {}
+    bags_per_patient = defaultdict(int)
+    patients_per_class = defaultdict(set)
+
+    for idx in train_idx:
+        pt_path, label = full_dataset.samples[idx]
+        patient_id = pt_path.parent.name
+        patient_to_label[patient_id] = label
+        bags_per_patient[patient_id] += 1
+        patients_per_class[label].add(patient_id)
+
+    num_patients_per_class = {k: len(v) for k, v in patients_per_class.items()}
+
+    sample_weights = []
+    for idx in train_idx:
+        pt_path, label = full_dataset.samples[idx]
+        patient_id = pt_path.parent.name
+        weight = 1.0 / (num_patients_per_class[label] * bags_per_patient[patient_id])
+        sample_weights.append(weight)
+
+    sampler_weights = torch.DoubleTensor(sample_weights)
+    patient_balanced_sampler = torch.utils.data.WeightedRandomSampler(
+        weights=sampler_weights,
+        num_samples=len(sampler_weights),
+        replacement=True,
+    )
+
     train_loader = DataLoader(
         Subset(full_dataset, train_idx),
         batch_size=args.batch_size,
-        shuffle=True,
+        sampler=patient_balanced_sampler,
         num_workers=args.num_workers,
         pin_memory=True,
         collate_fn=collate_bags,

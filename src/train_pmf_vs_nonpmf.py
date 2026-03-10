@@ -506,8 +506,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--early_stop_patience",
         type=int,
-        default=10,
-        help="Stop training after this many epochs without val macro recall improvement (default: 10).",
+        default=15,
+        help="Stop training after this many epochs without val macro recall improvement (default: 15).",
     )
 
     return parser.parse_args()
