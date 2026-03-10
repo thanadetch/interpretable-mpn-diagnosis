@@ -38,6 +38,7 @@ from data.bag_dataset import MPNBagDatasetFull
 from models.clam import CLAM_SB
 from models.dtfd_mil import DTFDMIL, compute_dtfd_loss
 from models.explicit_mil import ExplicitMetricsMIL
+from models.prototype_loss import PrototypeSeparationLoss
 from models.hybrid_mil import HybridMIL
 from models.residual_metric_mil import ResidualMetricMIL
 from models.simple_mil import SimpleGatedMIL
@@ -181,6 +182,10 @@ def train_one_epoch(
     bag_weight: float = 0.7,
     inst_weight: float = 0.3,
     attention_bias: bool = False,
+    embed_sep_loss: Optional[nn.Module] = None,
+    embed_sep_weight: float = 0.05,
+    embed_sep_warmup: int = 5,
+    epoch: int = 1,
 ) -> Tuple[float, float, float, List[float], float, dict]:
     """Train for one epoch. Handles 'simple', 'dtfd', and 'clam_sb' model types."""
     model.train()
@@ -202,10 +207,10 @@ def train_one_epoch(
             label = labels[i].item()
 
             if model_type == "dtfd":
-                bag_logits, pseudo_bag_logits, instance_logits_list = (
+                bag_logits, pseudo_bag_logits, instance_logits_list, bag_embed = (
                     model.forward_training(features)
                 )
-                loss, loss_dict = compute_dtfd_loss(
+                loss_dtfd, loss_dict = compute_dtfd_loss(
                     bag_logits=bag_logits,
                     pseudo_bag_logits=pseudo_bag_logits,
                     instance_logits_list=instance_logits_list,
@@ -214,6 +219,20 @@ def train_one_epoch(
                     tier1_weight=tier1_weight,
                     instance_weight=instance_weight,
                 )
+                loss = loss_dtfd
+
+                # Activate separation loss once warmup is reached (epoch >= warmup)
+                if embed_sep_loss is not None and epoch >= embed_sep_warmup:
+                    label_tensor = torch.tensor([label], device=device)
+                    sep_loss, pull, push, sim_own, sim_other = embed_sep_loss(bag_embed.unsqueeze(0), label_tensor)
+                    loss = loss + (embed_sep_weight * sep_loss)
+
+                    loss_dict["sep_loss"] = sep_loss.item()
+                    loss_dict["pull"] = pull.item()
+                    loss_dict["push"] = push.item()
+                    loss_dict["sim_own"] = sim_own.item()
+                    loss_dict["sim_other"] = sim_other.item()
+
                 for key, value in loss_dict.items():
                     loss_sums[key] += value
             elif model_type == "clam_sb":
@@ -514,6 +533,43 @@ def parse_args() -> argparse.Namespace:
         help="Stop training after this many epochs without val macro recall improvement (default: 15).",
     )
 
+    # Prototype Separation Loss arguments
+    parser.add_argument(
+        "--use_embed_sep",
+        action="store_true",
+        help="Enable Cosine Prototype Separation Loss on DTFD bag embeddings.",
+    )
+    parser.add_argument(
+        "--embed_sep_weight",
+        type=float,
+        default=0.05,
+        help="Weight for the prototype separation loss (default: 0.05).",
+    )
+    parser.add_argument(
+        "--embed_sep_margin",
+        type=float,
+        default=0.2,
+        help="Margin for the push term in prototype separation loss (default: 0.2).",
+    )
+    parser.add_argument(
+        "--embed_sep_beta",
+        type=float,
+        default=0.5,
+        help="Weight for the push term relative to pull (default: 0.5).",
+    )
+    parser.add_argument(
+        "--embed_sep_momentum",
+        type=float,
+        default=0.9,
+        help="EMA momentum for prototype updates (default: 0.9).",
+    )
+    parser.add_argument(
+        "--embed_sep_warmup",
+        type=int,
+        default=5,
+        help="Number of warmup epochs before activating separation loss (default: 5).",
+    )
+
     return parser.parse_args()
 
 
@@ -711,6 +767,20 @@ def main() -> None:
     criterion = nn.CrossEntropyLoss(
         weight=class_weights, label_smoothing=args.label_smoothing
     )
+
+    embed_sep_loss_fn = None
+    if args.model_type == "dtfd" and getattr(args, "use_embed_sep", False):
+        embed_sep_loss_fn = PrototypeSeparationLoss(
+            feat_dim=model.final_embed_dim,
+            num_classes=num_classes,
+            momentum=args.embed_sep_momentum,
+            margin=args.embed_sep_margin,
+            beta=args.embed_sep_beta,
+        ).to(device)
+        # PrototypeSeparationLoss has only buffers (no trainable params),
+        # so we do not add it to the optimizer.
+        log(f"\nPrototype Separation Enabled: weight={args.embed_sep_weight}, margin={args.embed_sep_margin}, warmup={args.embed_sep_warmup}", log_file)
+
     optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=0.01)
 
     scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=1e-6)
@@ -776,6 +846,10 @@ def main() -> None:
             bag_weight=args.bag_weight,
             inst_weight=args.inst_weight,
             attention_bias=args.attention_bias,
+            embed_sep_loss=embed_sep_loss_fn,
+            embed_sep_weight=args.embed_sep_weight,
+            embed_sep_warmup=args.embed_sep_warmup,
+            epoch=epoch,
         )
 
         # Validate

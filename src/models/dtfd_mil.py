@@ -215,6 +215,7 @@ class DTFDMIL(nn.Module):
             nn.Dropout(dropout),
             nn.Linear(hidden_dim, num_classes),
         )
+        self.final_embed_dim = proj_dim
 
     def _create_pseudo_bags(
         self,
@@ -313,9 +314,16 @@ class DTFDMIL(nn.Module):
             bag_logits: Final bag-level logits [C].
             pseudo_bag_logits: Tier 1 logits for each pseudo-bag [K, C].
             instance_logits_list: List of instance logits per pseudo-bag.
+            bag_embed: Full-bag Tier-1 aggregated embedding [D], aligned
+                       with the inference path for prototype separation loss.
         """
         # Project features
         projected = self.projection(features)  # [N, proj_dim]
+
+        # Full-bag Tier-1 aggregation (aligned with inference path).
+        # This embedding is used by the prototype separation loss so that
+        # the representation being regularised matches what inference uses.
+        _, bag_embed, _ = self.forward_tier1(projected)  # [proj_dim]
 
         # Create pseudo-bags
         pseudo_bags = self._create_pseudo_bags(projected, self.num_pseudo_bags)
@@ -339,9 +347,10 @@ class DTFDMIL(nn.Module):
         pseudo_bag_logits = torch.stack(pseudo_bag_logits, dim=0)  # [K, C]
 
         # Tier 2: Aggregate pseudo-bags
-        bag_logits, _ = self.forward_tier2(pseudo_bag_features)  # [C]
+        tier2_aggregated, _ = self.tier2_attention(pseudo_bag_features)
+        bag_logits = self.bag_classifier(tier2_aggregated)
 
-        return bag_logits, pseudo_bag_logits, instance_logits_list
+        return bag_logits, pseudo_bag_logits, instance_logits_list, bag_embed
 
     def forward(
         self,
