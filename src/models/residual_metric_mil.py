@@ -64,7 +64,7 @@ class ResidualMetricMIL(nn.Module):
         """
         Args:
             features: Instance features [N, D].
-            metrics:  Optional dict with keys "tissue", "bg", "space".
+            metrics:  Optional dict with keys "tissue_frac", "border_white_frac", "internal_white_frac".
             return_attention: unused, kept for interface compat.
 
         Returns:
@@ -104,33 +104,33 @@ class ResidualMetricMIL(nn.Module):
         """Return a [7] tensor of roughly [-1, 1]-scaled ROI metrics."""
         zeros = torch.zeros(7, device=device)
 
-        if metrics is None or "tissue" not in metrics:
+        if metrics is None or "tissue_frac" not in metrics:
             return zeros
 
         try:
-            tissue = metrics["tissue"]
-            if not isinstance(tissue, torch.Tensor) or tissue.numel() == 0:
+            tissue_frac = metrics["tissue_frac"]
+            if not isinstance(tissue_frac, torch.Tensor) or tissue_frac.numel() == 0:
                 return zeros
-            tissue = tissue.float().to(device)
+            tissue_frac = tissue_frac.float().to(device)
 
-            bg = metrics.get("bg")
-            if not isinstance(bg, torch.Tensor) or bg.numel() == 0:
-                bg = torch.zeros_like(tissue)
+            border_white_frac = metrics.get("border_white_frac")
+            if not isinstance(border_white_frac, torch.Tensor) or border_white_frac.numel() == 0:
+                border_white_frac = torch.zeros_like(tissue_frac)
             else:
-                bg = bg.float().to(device)
+                border_white_frac = border_white_frac.float().to(device)
 
-            space = metrics.get("space")
-            if not isinstance(space, torch.Tensor) or space.numel() == 0:
-                space = torch.zeros_like(tissue)
+            internal_white_frac = metrics.get("internal_white_frac")
+            if not isinstance(internal_white_frac, torch.Tensor) or internal_white_frac.numel() == 0:
+                internal_white_frac = torch.zeros_like(tissue_frac)
             else:
-                space = space.float().to(device)
+                internal_white_frac = internal_white_frac.float().to(device)
 
-            mean_tissue = (tissue.mean().view(1) - 0.5) * 2.0
-            mean_bg = (bg.mean().view(1) - 0.5) * 2.0
-            mean_space = (space.mean().view(1) - 0.5) * 2.0
-            frac_low_tissue = ((tissue < 0.2).float().mean().view(1) - 0.5) * 2.0
-            frac_high_bg = ((bg > 0.8).float().mean().view(1) - 0.5) * 2.0
-            p75_tissue = (torch.quantile(tissue, 0.75).view(1) - 0.5) * 2.0
+            mean_tissue = (tissue_frac.mean().view(1) - 0.5) * 2.0
+            mean_border_white = (border_white_frac.mean().view(1) - 0.5) * 2.0
+            mean_internal_white = (internal_white_frac.mean().view(1) - 0.5) * 2.0
+            frac_low_tissue = ((tissue_frac < 0.2).float().mean().view(1) - 0.5) * 2.0
+            frac_high_border = ((border_white_frac > 0.8).float().mean().view(1) - 0.5) * 2.0
+            p75_tissue = (torch.quantile(tissue_frac, 0.75).view(1) - 0.5) * 2.0
             log_n = (
                 torch.log1p(
                     torch.tensor(
@@ -143,10 +143,10 @@ class ResidualMetricMIL(nn.Module):
             g = torch.cat(
                 [
                     mean_tissue,
-                    mean_bg,
-                    mean_space,
+                    mean_border_white,
+                    mean_internal_white,
                     frac_low_tissue,
-                    frac_high_bg,
+                    frac_high_border,
                     p75_tissue,
                     log_n,
                 ]

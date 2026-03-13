@@ -96,6 +96,11 @@
     --mil_checkpoint experiments/simple_virchow2_20260304_103904/best_simple_virchow2.pth \
     --split test`
 
+`python -m src.tools.visualize_heatmap_set \
+    --mil_checkpoint experiments/et_vs_pv_dtfd_titan_20260309_165935/best_et_vs_pv_dtfd_titan.pth \
+    --task et_vs_pv \
+    --split test`
+
 
 `python src/tools/analyze_shortcuts.py \
         --mil_checkpoint experiments/simple_virchow2_bias_20260304_104414/best_simple_virchow2_bias.pth \
@@ -117,3 +122,10 @@
   --ckpt_stage1 experiments/pmf_vs_nonpmf_simple_titan_20260308_112116/best_pmf_vs_nonpmf_simple_titan.pth \
   --ckpt_stage2 experiments/et_vs_pv_dtfd_titan_20260309_165935/best_et_vs_pv_dtfd_titan.pth \
   --save_csv`
+
+ `python src/tools/sanity_check_info.py \
+    --features_dir data/features_uni2 \
+    --subtypes ET PV \
+    --score_type cellular_purple_frac \
+    --num_rois 100
+    --postfix v2`

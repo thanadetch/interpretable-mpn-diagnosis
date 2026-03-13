@@ -66,8 +66,8 @@ class ExplicitMetricsMIL(nn.Module):
         Args:
             features: Instance features [N, D].
             return_attention: Whether to return attention weights.
-            metrics: Optional dict with keys 'tissue', 'space', 'bg', 'bad'
-                     (each a tensor of length N).
+            metrics: Optional dict with keys 'tissue_frac', 'internal_white_frac',
+                     'border_white_frac', 'nuisance_score' (each a tensor of length N).
 
         Returns:
             logits: Bag-level logits [C].
@@ -85,33 +85,33 @@ class ExplicitMetricsMIL(nn.Module):
         z_attn = torch.mm(attention.unsqueeze(0), h).squeeze(0)  # [hidden_dim]
 
         # ── Stream B: Explicit global metrics (8 scalars) ─────────────
-        if metrics is not None and "space" in metrics:
-            tissue = metrics["tissue"].to(h.device).float()
-            space = metrics["space"].to(h.device).float()
-            bg = metrics["bg"].to(h.device).float()
-            bad = metrics["bad"].to(h.device).float()
+        if metrics is not None and "internal_white_frac" in metrics:
+            tissue_frac = metrics["tissue_frac"].to(h.device).float()
+            internal_white_frac = metrics["internal_white_frac"].to(h.device).float()
+            border_white_frac = metrics["border_white_frac"].to(h.device).float()
+            nuisance_score = metrics["nuisance_score"].to(h.device).float()
 
-            mean_tissue = tissue.mean().view(1)
-            mean_space = space.mean().view(1)
-            mean_bg = bg.mean().view(1)
-            mean_bad = bad.mean().view(1)
-            space_to_tissue = (space / (tissue + 1e-6)).mean().view(1)
-            frac_bad = (bad > 0.5).float().mean().view(1)
+            mean_tissue_frac = tissue_frac.mean().view(1)
+            mean_internal_white = internal_white_frac.mean().view(1)
+            mean_border_white = border_white_frac.mean().view(1)
+            mean_nuisance = nuisance_score.mean().view(1)
+            space_to_tissue = (internal_white_frac / (tissue_frac + 1e-6)).mean().view(1)
+            frac_nuisance = (nuisance_score > 0.5).float().mean().view(1)
             n_patches = torch.tensor(
                 [features.size(0) / 100.0], dtype=torch.float32, device=h.device
             )
-            tissue_frac = (tissue > 0.15).float().mean().view(1)
+            frac_high_tissue = (tissue_frac > 0.15).float().mean().view(1)
 
             g = torch.cat(
                 [
-                    mean_tissue,
-                    mean_space,
-                    mean_bg,
-                    mean_bad,
+                    mean_tissue_frac,
+                    mean_internal_white,
+                    mean_border_white,
+                    mean_nuisance,
                     space_to_tissue,
-                    frac_bad,
+                    frac_nuisance,
                     n_patches,
-                    tissue_frac,
+                    frac_high_tissue,
                 ],
                 dim=0,
             )  # [8]

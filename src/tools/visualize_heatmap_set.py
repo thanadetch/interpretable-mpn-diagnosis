@@ -26,7 +26,7 @@ import re
 import sys
 from collections import defaultdict
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import cv2
 import matplotlib.pyplot as plt
@@ -46,6 +46,7 @@ from core.config import CLASS_MAP, CLASS_MAP_INV, hf_login
 from data.bag_dataset import MPNBagDatasetFull
 from models.hybrid_mil import HybridMIL
 from models.simple_mil import SimpleGatedMIL
+from models.dtfd_mil import DTFDMIL
 
 CLASS_NAMES = [CLASS_MAP_INV[i] for i in range(len(CLASS_MAP))]
 
@@ -317,6 +318,7 @@ def load_backbone(
 def load_mil_model(
     checkpoint_path: Path,
     device: torch.device,
+    num_classes: int = 3,
 ) -> Tuple[nn.Module, str, str]:
     """
     Load a trained MIL model from checkpoint.
@@ -333,7 +335,6 @@ def load_mil_model(
     model_type = args["model_type"]
     backbone_name = args["backbone"]
     input_dim = BACKBONE_CONFIG[backbone_name]["dim"]
-    num_classes = len(CLASS_MAP)
 
     if model_type == "simple":
         topk = args.get("topk", 0)
@@ -349,9 +350,18 @@ def load_mil_model(
             num_classes=num_classes,
             topk=topk,
         )
+    elif model_type == "dtfd":
+        num_pseudo_bags = args.get("num_pseudo_bags", 8)
+        dropout = args.get("dropout", 0.25)
+        model = DTFDMIL(
+            input_dim=input_dim,
+            num_classes=num_classes,
+            num_pseudo_bags=num_pseudo_bags,
+            dropout=dropout,
+        )
     else:
         raise ValueError(
-            f"Heatmap visualization supports 'simple' and 'hybrid' MIL models, "
+            f"Heatmap visualization supports 'simple', 'hybrid', and 'dtfd' MIL models, "
             f"got '{model_type}'."
         )
 
@@ -498,6 +508,7 @@ def generate_grid_gallery(
     features_path: Path,
     class_name: str,
     save_path: Path,
+    class_names: List[str],
     patch_size: int = 224,
     n_cols: int = 8,
     device: torch.device = torch.device("cpu"),
@@ -534,8 +545,8 @@ def generate_grid_gallery(
     mil_attention, pred_class, probs = compute_mil_attention(
         features_path, mil_model, device, ckpt_args=ckpt_args
     )
-    pred_name = CLASS_NAMES[pred_class]
-    prob_str = " | ".join(f"{CLASS_NAMES[i]}: {p:.3f}" for i, p in enumerate(probs))
+    pred_name = class_names[pred_class]
+    prob_str = " | ".join(f"{class_names[i]}: {p:.3f}" for i, p in enumerate(probs))
     print(f"    Prediction: {pred_name} (GT: {class_name})")
     print(f"    Probabilities: {prob_str}")
 
@@ -576,7 +587,7 @@ def generate_grid_gallery(
 
     # Suptitle
     fig.suptitle(
-        f"Image {image_id}  —  Pred: {pred_name} (GT: {class_name})\n{prob_str}",
+        f"Image {image_id}  \u2014  Pred: {pred_name} (GT: {class_name})\n{prob_str}",
         fontsize=13,
         fontweight="bold",
         y=0.98,
@@ -773,6 +784,13 @@ def parse_args() -> argparse.Namespace:
         choices=["ET", "PV", "PMF"],
         help="Specific subtype to visualize. If not provided, visualizes all subtypes.",
     )
+    parser.add_argument(
+        "--task",
+        type=str,
+        choices=["et_vs_pv", "pmf_vs_nonpmf", "multi"],
+        default="et_vs_pv",
+        help="Task type to determine class mapping and num_classes (default: et_vs_pv).",
+    )
 
     if torch.cuda.is_available():
         _default_device = "cuda"
@@ -799,6 +817,16 @@ def main() -> None:
     args = parse_args()
     device = torch.device(args.device)
     mil_checkpoint = Path(args.mil_checkpoint)
+
+    if args.task == "et_vs_pv":
+        class_names = ["ET", "PV"]
+        num_classes = 2
+    elif args.task == "pmf_vs_nonpmf":
+        class_names = ["non-PMF", "PMF"]
+        num_classes = 2
+    else:
+        class_names = [CLASS_MAP_INV[i] for i in range(len(CLASS_MAP))]
+        num_classes = len(class_names)
 
     print("=" * 60)
     print("Batch Heatmap Set Visualization")
@@ -837,11 +865,11 @@ def main() -> None:
         class_counts[info["class_name"]] += 1
 
     print(f"\n  Target Patients: {len(patients)}")
-    for cn in CLASS_NAMES:
+    for cn in class_names:
         print(f"    {cn}: {class_counts.get(cn, 0)} patients")
 
     print("\nLoading MIL model...")
-    mil_model, _, _ = load_mil_model(mil_checkpoint, device)
+    mil_model, _, _ = load_mil_model(mil_checkpoint, device, num_classes=num_classes)
     print("  ✅ MIL model loaded.\n")
 
     print(f"Loading {cfg['display_name']} backbone...")
@@ -905,6 +933,7 @@ def main() -> None:
                 features_path=feat_path,
                 class_name=class_name,
                 save_path=save_path,
+                class_names=class_names,
                 patch_size=args.patch_size,
                 n_cols=args.n_cols,
                 device=device,

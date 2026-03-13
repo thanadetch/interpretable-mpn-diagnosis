@@ -153,6 +153,83 @@ def space_bg_fractions_from_rgb(patch_rgb_uint8: np.ndarray) -> Tuple[float, flo
     return space_frac, bg_blank_frac
 
 
+def tissue_mask_from_rgb(patch_rgb_uint8: np.ndarray, tissue_thr: float = 0.05) -> np.ndarray:
+    """Returns a boolean mask of tissue pixels based on Optical Density."""
+    img = np.clip(patch_rgb_uint8.astype(np.float32), 1.0, 255.0)
+    od = -np.log10(img / 255.0)
+    mean_od = od.mean(axis=2)
+    return mean_od > tissue_thr
+
+
+def rgb_uint8_to_float01(rgb_uint8: np.ndarray) -> np.ndarray:
+    rgb = rgb_uint8.astype(np.float32) / 255.0
+    return np.clip(rgb, 1e-6, 1.0)
+
+
+def rgb_to_od(rgb_float: np.ndarray) -> np.ndarray:
+    return -np.log(rgb_float)
+
+
+def sigmoid(x: np.ndarray) -> np.ndarray:
+    return 1.0 / (1.0 + np.exp(-x))
+
+
+def soft_gt(x: np.ndarray, center: float, scale: float) -> np.ndarray:
+    scale = max(scale, 1e-6)
+    return sigmoid((x - center) / scale)
+
+
+def soft_lt(x: np.ndarray, center: float, scale: float) -> np.ndarray:
+    scale = max(scale, 1e-6)
+    return sigmoid((center - x) / scale)
+
+
+def compute_patch_color_metrics(
+    patch_rgb: np.ndarray,
+    core_tissue_mask: np.ndarray,
+    min_core_pixels: int = 100,
+) -> Tuple[float, float]:
+    """
+    Computes soft fractions for purple/dark (nuclei-rich) and warm/pink low-info proxy.
+    Returns: (cellular_purple_frac, pink_lowinfo_frac)
+    """
+    if core_tissue_mask.sum() < min_core_pixels:
+        return 0.0, 0.0
+
+    rgb = rgb_uint8_to_float01(patch_rgb)
+    # cv2.cvtColor on float32 RGB returns standard CIELAB scale (L: 0-100, a/b: ~-127 to 127)
+    lab = cv2.cvtColor(rgb, cv2.COLOR_RGB2LAB)
+    od = rgb_to_od(rgb)
+    od_sum = od.sum(axis=-1)
+
+    a = lab[..., 1][core_tissue_mask]
+    b = lab[..., 2][core_tissue_mask]
+    ab = a - b
+    chroma = np.sqrt(a * a + b * b)
+    od_t = od_sum[core_tissue_mask]
+
+    # ---- cellular_purple_frac ----
+    purple_score = soft_gt(ab, 8.0, 4.0)
+    dark_score = soft_gt(od_t, 1.8, 0.35)
+    chroma_score = soft_gt(chroma, 12.0, 5.0)
+
+    cellular_purple_pixel = purple_score * dark_score * chroma_score
+    cellular_purple_frac = float(np.mean(cellular_purple_pixel))
+
+    # ---- pink_lowinfo_frac ----
+    warm_score = soft_gt(a, 10.0, 5.0) * soft_gt(b, 5.0, 5.0)
+    nonpurple_score = soft_lt(ab, 6.0, 4.0)
+    lightmid_score = soft_lt(od_t, 1.9, 0.35)
+
+    pink_lowinfo_pixel = warm_score * nonpurple_score * lightmid_score
+    raw_pink_frac = float(np.mean(pink_lowinfo_pixel))
+
+    # Soft suppression: prevent penalizing mixed/useful cellular patches
+    pink_lowinfo_frac = raw_pink_frac * (1.0 - cellular_purple_frac)
+
+    return cellular_purple_frac, pink_lowinfo_frac
+
+
 # =============================================================================
 # Patch Dataset (for batched feature extraction)
 # =============================================================================
@@ -189,22 +266,36 @@ class PatchDataset(Dataset):
 
         # 2. Calculate metrics
         img_array = np.array(img, dtype=np.uint8)
-        tissue = tissue_fraction_from_rgb(img_array)
-        space, bg = space_bg_fractions_from_rgb(img_array)
+        tissue_frac = tissue_fraction_from_rgb(img_array)
+        internal_white_frac, border_white_frac = space_bg_fractions_from_rgb(img_array)
 
-        # 3. Pre-compute the 'bad' score for Logit Bias
+        # 3. Pre-compute the nuisance score for Logit Bias
         eps = 1e-6
-        r_ratio = space / (tissue + eps)
+        space_to_tissue_ratio = float(internal_white_frac / (tissue_frac + eps))
+
         # sigmoid equivalent: 1 / (1 + exp(-x))
-        bad_bg = 1.0 / (1.0 + np.exp(-((bg - 0.2) / 0.15)))
-        bad_space = 1.0 / (1.0 + np.exp(-((r_ratio - 0.8) / 0.15)))
-        bad = float(np.clip(bad_bg + bad_space, 0.0, 1.0))
+        bad_border = 1.0 / (1.0 + np.exp(-((border_white_frac - 0.2) / 0.15)))
+        bad_internal = 1.0 / (1.0 + np.exp(-((space_to_tissue_ratio - 0.8) / 0.15)))
+        nuisance_score = float(np.clip(bad_border + bad_internal, 0.0, 1.0))
+
+        # 4. Compute Color Metrics (Soft LAB & OD gating)
+        od_tissue_mask = tissue_mask_from_rgb(img_array)
+        # Create strict core mask by explicitly excluding bright white/empty spaces
+        absolute_white_mask = (img_array > 220).all(axis=-1)
+        core_tissue_mask = od_tissue_mask & (~absolute_white_mask)
+
+        cellular_purple_frac, pink_lowinfo_frac = compute_patch_color_metrics(
+            img_array, core_tissue_mask=core_tissue_mask
+        )
 
         metrics = {
-            "bg": float(bg),
-            "tissue": float(tissue),
-            "space": float(space),
-            "bad": float(bad),
+            "border_white_frac": float(border_white_frac),
+            "tissue_frac": float(tissue_frac),
+            "internal_white_frac": float(internal_white_frac),
+            "nuisance_score": float(nuisance_score),
+            "space_to_tissue_ratio": space_to_tissue_ratio,
+            "cellular_purple_frac": cellular_purple_frac,
+            "pink_lowinfo_frac": pink_lowinfo_frac,
             "row": int(row),
             "col": int(col),
         }
@@ -248,7 +339,17 @@ def extract_features_for_image(
 
     use_amp = device.type == "cuda"
     all_features = []
-    all_metrics = {"bg": [], "tissue": [], "space": [], "bad": [], "row": [], "col": []}
+    all_metrics = {
+        "border_white_frac": [],
+        "tissue_frac": [],
+        "internal_white_frac": [],
+        "nuisance_score": [],
+        "space_to_tissue_ratio": [],
+        "cellular_purple_frac": [],
+        "pink_lowinfo_frac": [],
+        "row": [],
+        "col": [],
+    }
 
     for batch_tensor, batch_metrics in loader:
         batch_tensor = batch_tensor.to(device)
@@ -266,10 +367,13 @@ def extract_features_for_image(
 
     # Float metrics
     concatenated_metrics = {
-        "bg": torch.cat(all_metrics["bg"], dim=0).float(),
-        "tissue": torch.cat(all_metrics["tissue"], dim=0).float(),
-        "space": torch.cat(all_metrics["space"], dim=0).float(),
-        "bad": torch.cat(all_metrics["bad"], dim=0).float(),
+        "border_white_frac": torch.cat(all_metrics["border_white_frac"], dim=0).float(),
+        "tissue_frac": torch.cat(all_metrics["tissue_frac"], dim=0).float(),
+        "internal_white_frac": torch.cat(all_metrics["internal_white_frac"], dim=0).float(),
+        "nuisance_score": torch.cat(all_metrics["nuisance_score"], dim=0).float(),
+        "space_to_tissue_ratio": torch.cat(all_metrics["space_to_tissue_ratio"], dim=0).float(),
+        "cellular_purple_frac": torch.cat(all_metrics["cellular_purple_frac"], dim=0).float(),
+        "pink_lowinfo_frac": torch.cat(all_metrics["pink_lowinfo_frac"], dim=0).float(),
     }
 
     # Integer coordinates tensor [N, 2]
