@@ -4,38 +4,48 @@ import torch.nn.functional as F
 
 
 class DualStreamMIL(nn.Module):
+    """
+    PV-ET Bi-Evidence MIL Architecture
+    Branch A (PV): Global Soft Attention (captures diffuse panmyelosis / hypercellularity)
+    Branch B (ET): Masked Soft Top-K Attention (captures focal giant megakaryocytes)
+    """
+
     def __init__(
         self,
         input_dim: int = 768,
         num_classes: int = 2,
         topk: int = 5,
-        hidden_dim: int = 256,
-        dropout_rate: float = 0.3,
+        hidden_dim: int = 128,
+        et_temp: float = 0.5,
     ):
-        """
-        Robust Dual-Branch Attention MIL (Optimized for Stage-2: ET vs PV)
-        Branch 1: Global Soft Attention (PV focus)
-        Branch 2: Learnable Weighted Top-K Attention (ET focus)
-        """
         super().__init__()
-        self.topk = topk
-        self.input_dim = input_dim
+        self.topk_et = topk
+        self.et_temp = et_temp
 
-        # --- Branch 1: Global Expert ---
-        self.global_attention = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim), nn.Tanh(), nn.Linear(hidden_dim, 1)
-        )
-
-        # --- Branch 2: Focal Expert ---
-        self.focal_attention = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim), nn.Tanh(), nn.Linear(hidden_dim, 1)
-        )
-
-        # --- Robust Fusion Classifier (MLP + Regularization) ---
-        self.fusion_classifier = nn.Sequential(
-            nn.Linear(input_dim * 2, hidden_dim),
+        # 1. Shared Adapter (Reduces dimensionality and regularizes latent space)
+        self.adapter = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
             nn.ReLU(),
-            nn.Dropout(dropout_rate),
+            nn.Dropout(0.2),
+        )
+
+        # 2. PV-Global Branch Attention (Broad evidence)
+        self.pv_attention = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim), nn.Tanh(), nn.Linear(hidden_dim, 1)
+        )
+
+        # 3. ET-Focal Branch Attention (Sharp evidence)
+        self.et_attention = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim), nn.Tanh(), nn.Linear(hidden_dim, 1)
+        )
+
+        # 4. Asymmetric Interaction Fusion Head
+        # Concat: [pv, et, |pv - et|, pv * et] -> 4 * hidden_dim
+        self.fusion_head = nn.Sequential(
+            nn.Linear(hidden_dim * 4, hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(0.25),
             nn.Linear(hidden_dim, num_classes),
         )
 
@@ -47,41 +57,48 @@ class DualStreamMIL(nn.Module):
             )
             x = x.squeeze(0)
 
-        N, D = x.shape
+        N, _ = x.shape
+
+        # Apply Shared Adapter: [N, D] -> [N, hidden_dim]
+        h = self.adapter(x)
 
         # ==========================================
-        # Branch 1: Global Soft Attention
+        # Branch A: PV-Global (Broad Soft Attention)
         # ==========================================
-        A_global_raw = self.global_attention(x)  # [N, 1]
-        A_global = F.softmax(A_global_raw, dim=0)  # [N, 1]
-        global_feature = torch.mm(A_global.t(), x)  # [1, D]
-
-        # ==========================================
-        # Branch 2: Focal Weighted Top-K Attention
-        # ==========================================
-        A_focal_raw = self.focal_attention(x)  # [N, 1]
-        A_focal_soft = F.softmax(A_focal_raw, dim=0)  # Convert to probabilities first
-
-        k = min(self.topk, N)
-
-        # Extract Top-K probabilities and their indices
-        top_A_focal, focal_indices = torch.topk(A_focal_soft, k, dim=0)
-
-        # Re-normalize ONLY the top-k scores so they sum to 1 (Weighted Mean)
-        top_A_focal_norm = top_A_focal / (top_A_focal.sum() + 1e-8)
-
-        # Multiply re-normalized scores by their respective patches
-        top_features = x[focal_indices.squeeze(1)]  # [k, D]
-        focal_feature = torch.mm(top_A_focal_norm.t(), top_features)  # [1, D]
+        A_pv_raw = self.pv_attention(h)  # [N, 1]
+        A_pv = torch.softmax(A_pv_raw, dim=0)  # [N, 1]
+        pv_feat = torch.mm(A_pv.t(), h)  # [1, hidden_dim]
 
         # ==========================================
-        # Fusion & Classification
+        # Branch B: ET-Focal (Masked Soft Top-K)
         # ==========================================
-        # Concat: [1, D] + [1, D] -> [1, 2*D]
-        fused_feature = torch.cat([global_feature, focal_feature], dim=1)
+        A_et_raw = self.et_attention(h)  # [N, 1]
+        k = min(self.topk_et, N)
 
-        # Pass through MLP with Dropout
-        logits = self.fusion_classifier(fused_feature)  # [1, num_classes]
+        # Find top-k scores and indices
+        topk_vals, topk_idx = torch.topk(A_et_raw, k, dim=0)
+
+        # Create -inf mask and scatter top-k values into it
+        mask = torch.full_like(A_et_raw, float("-inf"))
+        mask.scatter_(0, topk_idx, topk_vals)
+
+        # Softmax over mask (only top-k elements get probability mass)
+        A_et = torch.softmax(mask / self.et_temp, dim=0)  # [N, 1]
+        et_feat = torch.mm(A_et.t(), h)  # [1, hidden_dim]
+
+        # ==========================================
+        # Interaction Fusion
+        # ==========================================
+        # Calculate interactions
+        diff_feat = torch.abs(pv_feat - et_feat)
+        prod_feat = pv_feat * et_feat
+
+        # Concatenate all evidences: [1, hidden_dim * 4]
+        fusion = torch.cat([pv_feat, et_feat, diff_feat, prod_feat], dim=1)
+
+        # Final prediction
+        logits = self.fusion_head(fusion)  # [1, num_classes]
         logits = logits.squeeze(0)  # [num_classes]
 
-        return logits, A_global, A_focal_raw
+        # Return 3 values to maintain compatibility with existing train loops for Exp 1
+        return logits, A_pv_raw, A_et_raw
