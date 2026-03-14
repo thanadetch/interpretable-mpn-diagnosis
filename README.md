@@ -123,6 +123,11 @@
   --ckpt_stage2 experiments/et_vs_pv_dtfd_titan_20260309_165935/best_et_vs_pv_dtfd_titan.pth \
   --save_csv`
 
+ `python src/eval_hierarchical_fusion.py \
+  --ckpt_stage1 experiments/pmf_vs_nonpmf_multi_branch_uni2_20260314_121233/best_pmf_vs_nonpmf_multi_branch_uni2.pth \
+  --ckpt_stage2 experiments/et_vs_pv_dtfd_titan_20260309_165935/best_et_vs_pv_dtfd_titan.pth \
+  --save_csv`
+
  `python src/tools/sanity_check_info.py \
     --features_dir data/features_uni2 \
     --subtypes ET PV \

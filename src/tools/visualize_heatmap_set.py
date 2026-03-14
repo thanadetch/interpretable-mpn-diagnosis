@@ -47,6 +47,8 @@ from data.bag_dataset import MPNBagDatasetFull
 from models.hybrid_mil import HybridMIL
 from models.simple_mil import SimpleGatedMIL
 from models.dtfd_mil import DTFDMIL
+from models.dual_stream_mil import DualStreamMIL
+from models.multi_branch_mil import MultiBranchMIL
 
 CLASS_NAMES = [CLASS_MAP_INV[i] for i in range(len(CLASS_MAP))]
 
@@ -359,10 +361,23 @@ def load_mil_model(
             num_pseudo_bags=num_pseudo_bags,
             dropout=dropout,
         )
+    elif model_type == "dual_stream":
+        topk = args.get("topk", 5)
+        model = DualStreamMIL(
+            input_dim=input_dim,
+            num_classes=num_classes,
+            topk=topk,
+        )
+    elif model_type == "multi_branch":
+        model = MultiBranchMIL(
+            input_dim=input_dim,
+            num_classes=num_classes,
+            topk_focal=args.get("topk_focal", 5),
+        )
     else:
         raise ValueError(
-            f"Heatmap visualization supports 'simple', 'hybrid', and 'dtfd' MIL models, "
-            f"got '{model_type}'."
+            f"Heatmap visualization supports 'simple', 'hybrid', 'dtfd', 'dual_stream', "
+            f"and 'multi_branch' MIL models, got '{model_type}'."
         )
 
     model.load_state_dict(checkpoint["model_state_dict"])

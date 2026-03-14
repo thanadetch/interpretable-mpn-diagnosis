@@ -41,6 +41,8 @@ from models.explicit_mil import ExplicitMetricsMIL
 from models.hybrid_mil import HybridMIL
 from models.residual_metric_mil import ResidualMetricMIL
 from models.simple_mil import SimpleGatedMIL
+from models.dual_stream_mil import DualStreamMIL
+from models.multi_branch_mil import MultiBranchMIL
 
 # ── backbone configuration ───────────────────────────────────────────────
 BACKBONE_CONFIG: Dict[str, Dict] = {
@@ -222,7 +224,11 @@ def train_one_epoch(
                 loss_sums["bag_loss"] += bag_loss.item()
                 loss_sums["inst_loss"] += inst_loss.item()
             elif model_type in ("simple", "explicit", "residual_metric"):
-                metrics = metrics_list[i] if (attention_bias or model_type in ("explicit", "residual_metric")) else None
+                metrics = (
+                    metrics_list[i]
+                    if (attention_bias or model_type in ("explicit", "residual_metric"))
+                    else None
+                )
                 logits, _, _ = model(features, metrics=metrics)
                 label_tensor = torch.tensor([label], device=device)
                 loss = criterion(logits.unsqueeze(0), label_tensor)
@@ -322,9 +328,18 @@ def validate_and_evaluate(
         for i, features in enumerate(features_list):
             features = features.to(device)
             label = labels[i : i + 1]
-            metrics = metrics_list[i] if (attention_bias or isinstance(model, (ExplicitMetricsMIL, ResidualMetricMIL))) else None
+            metrics = (
+                metrics_list[i]
+                if (
+                    attention_bias
+                    or isinstance(model, (ExplicitMetricsMIL, ResidualMetricMIL))
+                )
+                else None
+            )
 
-            if isinstance(model, (SimpleGatedMIL, ExplicitMetricsMIL, ResidualMetricMIL)):
+            if isinstance(
+                model, (SimpleGatedMIL, ExplicitMetricsMIL, ResidualMetricMIL)
+            ):
                 logits, _, _ = model(features, return_attention=False, metrics=metrics)
             else:
                 logits, _, _ = model(features)
@@ -408,8 +423,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--model_type",
         default="simple",
-        choices=["simple", "dtfd", "clam_sb", "hybrid", "explicit", "residual_metric"],
-        help="MIL model type: 'simple' | 'dtfd' | 'clam_sb' | 'hybrid' | 'explicit' | 'residual_metric'. Default: simple.",
+        choices=[
+            "simple",
+            "dtfd",
+            "clam_sb",
+            "hybrid",
+            "explicit",
+            "residual_metric",
+            "dual_stream",
+            "multi_branch",
+        ],
+        help="MIL model type. Default: simple.",
     )
     parser.add_argument(
         "--data_root",
@@ -639,6 +663,19 @@ def main() -> None:
             input_dim=input_dim,
             num_classes=num_classes,
             topk=k,
+        ).to(device)
+    elif args.model_type == "dual_stream":
+        k = args.topk if args.topk > 0 else 5
+        model = DualStreamMIL(
+            input_dim=input_dim,
+            num_classes=num_classes,
+            topk=k,
+        ).to(device)
+    elif args.model_type == "multi_branch":
+        model = MultiBranchMIL(
+            input_dim=input_dim,
+            num_classes=num_classes,
+            topk_focal=5,
         ).to(device)
     elif args.model_type == "residual_metric":
         model = ResidualMetricMIL(
