@@ -22,6 +22,7 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.utils.data import DataLoader, Subset
@@ -67,6 +68,65 @@ CLASS_NAMES = ["ET", "PV"]
 
 # Suppress sklearn warning when y_pred contains classes absent from y_true
 warnings.filterwarnings("ignore", message="y_pred contains classes not in y_true")
+
+# ==========================================
+# Morphology-based VL Prompts (Ensemble)
+# ==========================================
+VL_PROMPTS = {
+    0: [  # Class 0: ET
+        "Bone marrow histology showing relatively normocellular or mildly hypercellular marrow.",
+        "Microscopy showing prominent large, mature megakaryocytes with hyperlobulated staghorn-like nuclei.",
+        "Essential thrombocythemia with megakaryocytic proliferation and absence of significant erythroid or granulocytic proliferation.",
+    ],
+    1: [  # Class 1: PV
+        "Bone marrow histology showing hypercellularity for age and panmyelosis.",
+        "Polycythemia vera characterized by prominent trilineage proliferation including erythroid, granulocytic, and megakaryocytic lineages.",
+        "Microscopy of marrow showing dense cellularity with pleomorphic megakaryocytes of varying sizes.",
+    ],
+}
+
+
+def encode_text_prompts(prompts_dict: dict, device: torch.device) -> torch.Tensor:
+    import torch.nn.functional as F
+    from transformers import AutoModel, AutoTokenizer
+    from core.config import hf_login
+
+    print("\n  [VL] Loading TITAN model for prompt ensembling...")
+    hf_login()
+
+    tokenizer = AutoTokenizer.from_pretrained(
+        "MahmoodLab/TITAN", trust_remote_code=True
+    )
+    titan_model = (
+        AutoModel.from_pretrained("MahmoodLab/TITAN", trust_remote_code=True)
+        .to(device)
+        .eval()
+    )
+
+    class_embeddings = []
+    with torch.inference_mode():
+        for class_idx in sorted(prompts_dict.keys()):
+            tokens = tokenizer(
+                prompts_dict[class_idx],
+                padding=True,
+                truncation=True,
+                return_tensors="pt",
+            )
+            input_ids = tokens["input_ids"].to(device)
+            # Encode and average
+            embs = titan_model.encode_text(input_ids, normalize=True)
+            avg_emb = F.normalize(embs.mean(dim=0), dim=-1)
+            class_embeddings.append(avg_emb)
+
+    del titan_model, tokenizer, tokens
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
+
+    final_embeddings = torch.stack(class_embeddings).to(device)  # [num_classes, D]
+    print(
+        f"  [VL] Text prior prototypes created successfully. Shape: {final_embeddings.shape}\n"
+    )
+    return final_embeddings
 
 
 # ── helpers ───────────────────────────────────────────────────────────────
@@ -183,6 +243,10 @@ def train_one_epoch(
     bag_weight: float = 0.7,
     inst_weight: float = 0.3,
     attention_bias: bool = False,
+    text_embeddings: torch.Tensor = None,
+    vl_alpha: float = 0.5,
+    vl_lambda_text: float = 0.5,
+    vl_lambda_cons: float = 0.15,
 ) -> Tuple[float, float, float, List[float], float, dict]:
     """Train for one epoch. Handles 'simple', 'dtfd', and 'clam_sb' model types."""
     model.train()
@@ -203,8 +267,46 @@ def train_one_epoch(
             features = features.to(device)  # [N, D]
             label = labels[i].item()
 
-            if model_type == "dtfd":
-                bag_logits, pseudo_bag_logits, instance_logits_list = (
+            if model_type == "dtfd" and text_embeddings is not None:
+                # VL-guided DTFD path: Multi-component Loss WITH Pseudo-bags
+                bag_logits, pseudo_bag_logits, instance_logits_list, logits_t = (
+                    model.forward_training(
+                        features, text_embeddings=text_embeddings
+                    )
+                )
+                label_tensor = torch.tensor([label], device=device)
+
+                # Late Fusion for prediction
+                final_logits = bag_logits + (vl_alpha * logits_t)
+
+                # 1. Main Visual Loss (DTFD Full Multi-Tier Loss)
+                loss_v, loss_dict = compute_dtfd_loss(
+                    bag_logits=bag_logits,
+                    pseudo_bag_logits=pseudo_bag_logits,
+                    instance_logits_list=instance_logits_list,
+                    bag_label=label,
+                    criterion=criterion,
+                    tier1_weight=tier1_weight,
+                    instance_weight=instance_weight,
+                )
+
+                # 2. Auxiliary Text Loss
+                loss_t = criterion(logits_t.unsqueeze(0), label_tensor)
+
+                # 3. Consistency Loss (KL Divergence)
+                log_prob_v = F.log_softmax(bag_logits.unsqueeze(0), dim=1)
+                prob_t = F.softmax(logits_t.unsqueeze(0).detach(), dim=1)
+                loss_cons = F.kl_div(log_prob_v, prob_t, reduction="batchmean")
+
+                loss = loss_v + (vl_lambda_text * loss_t) + (vl_lambda_cons * loss_cons)
+
+                # Log components
+                for key, value in loss_dict.items():
+                    loss_sums[key] += value
+                loss_sums["loss_t"] += loss_t.item()
+                loss_sums["loss_cons"] += loss_cons.item()
+            elif model_type == "dtfd":
+                bag_logits, pseudo_bag_logits, instance_logits_list, _ = (
                     model.forward_training(features)
                 )
                 loss, loss_dict = compute_dtfd_loss(
@@ -246,7 +348,12 @@ def train_one_epoch(
 
             batch_loss = batch_loss + loss
 
-            pred = (bag_logits if model_type == "dtfd" else logits).argmax().item()
+            if model_type == "dtfd" and text_embeddings is not None:
+                pred = final_logits.argmax().item()
+            elif model_type == "dtfd":
+                pred = bag_logits.argmax().item()
+            else:
+                pred = logits.argmax().item()
             batch_correct += int(pred == label)
             all_preds.append(pred)
             all_labels.append(label)
@@ -304,6 +411,8 @@ def validate_and_evaluate(
     device: torch.device,
     desc: str = "  Val  ",
     attention_bias: bool = False,
+    text_embeddings: torch.Tensor = None,
+    vl_alpha: float = 0.5,
 ) -> Tuple[float, float, float, List[float], float, str, str]:
     """
     Validate/Test a MIL model and return metric strings.
@@ -341,24 +450,51 @@ def validate_and_evaluate(
                 else None
             )
 
-            if isinstance(
+            if text_embeddings is not None and isinstance(model, DTFDMIL):
+                # VL-guided DTFD path: Late Fusion
+                logits_v, logits_t, _, _ = model(
+                    features, text_embeddings=text_embeddings
+                )
+                final_logits = logits_v + (vl_alpha * logits_t)
+                loss = criterion(final_logits.unsqueeze(0), label)
+                running_loss += loss.item()
+                pred = final_logits.argmax()
+                correct += pred.eq(label.squeeze()).sum().item()
+                total += 1
+                all_preds.append(pred.item())
+                all_labels.append(label.item())
+            elif isinstance(
                 model, (SimpleGatedMIL, ExplicitMetricsMIL, ResidualMetricMIL)
             ):
                 logits, _, _ = model(features, return_attention=False, metrics=metrics)
+                logits = logits.unsqueeze(0)
+                loss = criterion(logits, label)
+                running_loss += loss.item()
+                pred = logits.argmax(dim=1)
+                correct += pred.eq(label).sum().item()
+                total += 1
+                all_preds.append(pred.item())
+                all_labels.append(label.item())
+            elif isinstance(model, DTFDMIL):
+                logits_v, _, _, _ = model(features)
+                logits = logits_v.unsqueeze(0)
+                loss = criterion(logits, label)
+                running_loss += loss.item()
+                pred = logits.argmax(dim=1)
+                correct += pred.eq(label).sum().item()
+                total += 1
+                all_preds.append(pred.item())
+                all_labels.append(label.item())
             else:
                 logits, _, _ = model(features)
-
-            logits = logits.unsqueeze(0)
-
-            loss = criterion(logits, label)
-            running_loss += loss.item()
-
-            pred = logits.argmax(dim=1)
-            correct += pred.eq(label).sum().item()
-            total += 1
-
-            all_preds.append(pred.item())
-            all_labels.append(label.item())
+                logits = logits.unsqueeze(0)
+                loss = criterion(logits, label)
+                running_loss += loss.item()
+                pred = logits.argmax(dim=1)
+                correct += pred.eq(label).sum().item()
+                total += 1
+                all_preds.append(pred.item())
+                all_labels.append(label.item())
 
     avg_loss = running_loss / total
     accuracy = 100.0 * correct / total
@@ -468,8 +604,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--instance_weight",
         type=float,
-        default=0.2,
-        help="Weight for instance-level loss (default: 0.2). Set to 0.0 to disable.",
+        default=0.0,
+        help="Weight for instance-level loss (default: 0.0). Set to 0.0 to disable.",
     )
     parser.add_argument(
         "--topk",
@@ -536,6 +672,30 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=15,
         help="Stop training after this many epochs without val macro recall improvement (default: 15).",
+    )
+    parser.add_argument(
+        "--use_vl_prior",
+        action="store_true",
+        help="Enable VL text prototypes as a soft semantic prior.",
+    )
+    # --- New VL Hyperparameters ---
+    parser.add_argument(
+        "--vl_alpha",
+        type=float,
+        default=0.5,
+        help="Late fusion weight for text logits (default: 0.5).",
+    )
+    parser.add_argument(
+        "--vl_lambda_text",
+        type=float,
+        default=0.5,
+        help="Weight for auxiliary text loss (default: 0.5).",
+    )
+    parser.add_argument(
+        "--vl_lambda_cons",
+        type=float,
+        default=0.15,
+        help="Weight for KL-divergence consistency loss (default: 0.15).",
     )
 
     return parser.parse_args()
@@ -765,6 +925,21 @@ def main() -> None:
     log(f"Label smoothing: {args.label_smoothing}", log_file)
     log(f"Early stop patience: {args.early_stop_patience}", log_file)
 
+    # Initialize VL Embeddings if flag is set
+    text_embeddings = None
+    if args.use_vl_prior:
+        log(f"\n{'=' * 60}", log_file)
+        log(f"Vision-Language (VL) Soft Prior Prompts:", log_file)
+        for class_idx in sorted(VL_PROMPTS.keys()):
+            class_name = CLASS_NAMES[class_idx]
+            log(f"  Class {class_idx} ({class_name}):", log_file)
+            for prompt_idx, prompt_text in enumerate(VL_PROMPTS[class_idx]):
+                log(f"    [{prompt_idx + 1}] {prompt_text}", log_file)
+        log(f"{'=' * 60}", log_file)
+
+        text_embeddings = encode_text_prompts(VL_PROMPTS, device)
+        log(f"VL Prior: ENABLED (text_embeddings shape={text_embeddings.shape})", log_file)
+
     # ── Training loop ─────────────────────────────────────────────────
     best_macro_recall = 0.0
     best_epoch = 0
@@ -813,6 +988,10 @@ def main() -> None:
             bag_weight=args.bag_weight,
             inst_weight=args.inst_weight,
             attention_bias=args.attention_bias,
+            text_embeddings=text_embeddings,
+            vl_alpha=args.vl_alpha,
+            vl_lambda_text=args.vl_lambda_text,
+            vl_lambda_cons=args.vl_lambda_cons,
         )
 
         # Validate
@@ -830,6 +1009,8 @@ def main() -> None:
             criterion,
             device,
             attention_bias=args.attention_bias,
+            text_embeddings=text_embeddings,
+            vl_alpha=args.vl_alpha,
         )
 
         # Per-epoch logging (2-line table)
@@ -910,6 +1091,8 @@ def main() -> None:
             device,
             desc="  Test ",
             attention_bias=args.attention_bias,
+            text_embeddings=text_embeddings,
+            vl_alpha=args.vl_alpha,
         )
 
         log(f"\n{test_cm_str}", log_file)

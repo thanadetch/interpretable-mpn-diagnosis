@@ -121,7 +121,8 @@ def forward_binary_probs(
     model: nn.Module, model_type: str, features: torch.Tensor, metrics: dict = None, attention_bias: bool = False
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     if model_type == "dtfd":
-        logits, _, _ = model(features)
+        outputs = model(features)
+        logits = outputs[0]
     elif model_type in ("simple", "explicit", "residual_metric"):
         m = metrics if (attention_bias or model_type in ("explicit", "residual_metric")) else None
         logits, _, _ = model(features, metrics=m)

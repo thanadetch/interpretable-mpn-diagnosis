@@ -200,7 +200,7 @@ def train_one_epoch(
             label = labels[i].item()
 
             if model_type == "dtfd":
-                bag_logits, pseudo_bag_logits, instance_logits_list = (
+                bag_logits, pseudo_bag_logits, instance_logits_list, _ = (
                     model.forward_training(features)
                 )
                 loss, loss_dict = compute_dtfd_loss(
@@ -341,6 +341,9 @@ def validate_and_evaluate(
                 model, (SimpleGatedMIL, ExplicitMetricsMIL, ResidualMetricMIL)
             ):
                 logits, _, _ = model(features, return_attention=False, metrics=metrics)
+            elif isinstance(model, DTFDMIL):
+                outputs = model(features)
+                logits = outputs[0]
             else:
                 logits, _, _ = model(features)
 

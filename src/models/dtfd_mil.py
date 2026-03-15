@@ -18,6 +18,7 @@ Key Features:
     - Gated attention mechanism for weighted aggregation
 """
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -178,6 +179,7 @@ class DTFDMIL(nn.Module):
     ) -> None:
         super().__init__()
 
+        self.input_dim = input_dim
         self.num_classes = num_classes
         self.num_pseudo_bags = num_pseudo_bags
         self.proj_dim = proj_dim
@@ -216,6 +218,9 @@ class DTFDMIL(nn.Module):
             nn.Linear(hidden_dim, num_classes),
         )
 
+        # Learnable temperature for VL Cosine Similarity
+        self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
+
     def _create_pseudo_bags(
         self,
         features: torch.Tensor,
@@ -235,8 +240,12 @@ class DTFDMIL(nn.Module):
         """
         N = features.size(0)
 
-        # Shuffle instance indices
-        indices = torch.randperm(N, device=features.device)
+        # CRITICAL FIX: Deterministic splitting during inference
+        if self.training:
+            indices = torch.randperm(N, device=features.device)
+        else:
+            indices = torch.arange(N, device=features.device)
+
         shuffled = features[indices]
 
         # Calculate instances per pseudo-bag
@@ -302,17 +311,20 @@ class DTFDMIL(nn.Module):
     def forward_training(
         self,
         features: torch.Tensor,
-    ) -> Tuple[torch.Tensor, torch.Tensor, List[torch.Tensor]]:
+        text_embeddings: torch.Tensor = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor, List[torch.Tensor], Optional[torch.Tensor]]:
         """
         Forward pass during training with pseudo-bag creation.
 
         Args:
             features: Raw instance features [N, D] (single bag, no batch dim).
+            text_embeddings: Optional VL text prototypes [num_classes, input_dim].
 
         Returns:
             bag_logits: Final bag-level logits [C].
             pseudo_bag_logits: Tier 1 logits for each pseudo-bag [K, C].
             instance_logits_list: List of instance logits per pseudo-bag.
+            logits_t: Text-guided logits [C] (None if no text_embeddings).
         """
         # Project features
         projected = self.projection(features)  # [N, proj_dim]
@@ -338,58 +350,94 @@ class DTFDMIL(nn.Module):
         pseudo_bag_features = torch.stack(pseudo_bag_representations, dim=0)
         pseudo_bag_logits = torch.stack(pseudo_bag_logits, dim=0)  # [K, C]
 
-        # Tier 2: Aggregate pseudo-bags
-        bag_logits, _ = self.forward_tier2(pseudo_bag_features)  # [C]
+        # Tier 2: Aggregate pseudo-bags explicitly to get the aggregated feature
+        tier2_aggregated, _ = self.tier2_attention(pseudo_bag_features)
+        bag_logits = self.bag_classifier(tier2_aggregated)
 
-        return bag_logits, pseudo_bag_logits, instance_logits_list
+        # Compute Text Logits safely
+        logits_t = None
+        if text_embeddings is not None:
+            assert text_embeddings.size(1) == self.input_dim
+            # CRITICAL FIX: Use self.projection[0] (only Linear) to avoid ReLU/Dropout on text
+            text_proj = self.projection[0](text_embeddings)
+
+            image_feat_norm = F.normalize(tier2_aggregated.squeeze(), dim=-1)
+            text_emb_norm = F.normalize(text_proj, dim=-1)
+            logit_scale = self.logit_scale.exp()
+            logits_t = logit_scale * torch.matmul(image_feat_norm, text_emb_norm.t())
+
+        return bag_logits, pseudo_bag_logits, instance_logits_list, logits_t
 
     def forward(
         self,
         features: torch.Tensor,
+        text_embeddings: torch.Tensor = None,
         return_attention: bool = False,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
+        **kwargs,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor]]:
         """
         Standard forward pass (for inference).
 
-        Processes the full bag through both tiers without pseudo-bag splitting.
+        Uses the same pseudo-bag + Tier-2 aggregation path as forward_training()
+        to avoid train-test feature distribution mismatch.
 
         Args:
             features: Instance features [B, N, D] or [N, D].
+            text_embeddings: Optional VL text prototypes [num_classes, input_dim].
             return_attention: Whether to return attention weights.
 
         Returns:
-            bag_logits: Bag-level predictions [B, C] or [C].
-            tier1_attention: Tier 1 attention weights (if return_attention).
+            logits_v: Visual bag-level predictions [B, C] or [C].
+            logits_t: Text-guided logits [B, C] or [C] (None if no text_embeddings).
+            tier1_attention: Always None (not available with pseudo-bag path).
             tier2_attention: Tier 2 attention weights (if return_attention).
         """
-        # Handle both batched and unbatched input
         squeeze_output = False
         if features.dim() == 2:
             features = features.unsqueeze(0)
             squeeze_output = True
 
         B, N, D = features.shape
+        assert B == 1, "Inference currently supports batch size 1 for pseudo-bag logic"
 
-        # Project features
-        projected = self.projection(features)  # [B, N, proj_dim]
+        # 1. Project features
+        projected = self.projection(features.squeeze(0))  # [N, proj_dim]
 
-        # Tier 1: Get instance-level aggregation
-        _, tier1_aggregated, tier1_attn = self.forward_tier1(
-            projected, return_attention
-        )  # [B, proj_dim], [B, N]
+        # 2. Create pseudo-bags (Deterministic during eval)
+        pseudo_bags = self._create_pseudo_bags(projected, self.num_pseudo_bags)
 
-        # For inference, use Tier 1 aggregation directly (no pseudo-bags)
-        # The tier2 attention operates on the single aggregated representation
-        bag_logits = self.bag_classifier(tier1_aggregated)  # [B, C]
+        # 3. Tier 1 Aggregation
+        pseudo_bag_representations = []
+        for pseudo_bag in pseudo_bags:
+            _, aggregated, _ = self.forward_tier1(pseudo_bag)
+            pseudo_bag_representations.append(aggregated)
 
-        if squeeze_output:
-            bag_logits = bag_logits.squeeze(0)
-            if tier1_attn is not None:
-                tier1_attn = tier1_attn.squeeze(0)
+        pseudo_bag_features = torch.stack(pseudo_bag_representations, dim=0)  # [K, proj_dim]
 
-        if return_attention:
-            return bag_logits, tier1_attn, None
-        return bag_logits, None, None
+        # 4. Tier 2 Aggregation (Visual Head)
+        tier2_aggregated, tier2_attn = self.tier2_attention(
+            pseudo_bag_features, return_attention=return_attention
+        )
+        logits_v = self.bag_classifier(tier2_aggregated)
+
+        # 5. VL Head (Matching Train Path precisely)
+        logits_t = None
+        if text_embeddings is not None:
+            text_proj = self.projection[0](text_embeddings)
+            image_feat_norm = F.normalize(tier2_aggregated.squeeze(), dim=-1)
+            text_emb_norm = F.normalize(text_proj, dim=-1)
+            logit_scale = self.logit_scale.exp()
+            logits_t = logit_scale * torch.matmul(image_feat_norm, text_emb_norm.t())
+
+        if not squeeze_output:
+            logits_v = logits_v.unsqueeze(0)
+            if logits_t is not None:
+                logits_t = logits_t.unsqueeze(0)
+            if tier2_attn is not None:
+                tier2_attn = tier2_attn.unsqueeze(0)
+
+        # Return tier2_attn as the final attention output
+        return logits_v, logits_t, None, tier2_attn
 
 
 def compute_dtfd_loss(
