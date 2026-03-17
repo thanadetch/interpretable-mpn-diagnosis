@@ -1,21 +1,22 @@
 """
-DTFD-MIL: Double-Tier Feature Distillation Multiple Instance Learning.
+Two-Tier Pseudo-Bag Hierarchical MIL (formerly custom DTFD-MIL).
 
-Implementation based on:
+Inspired by:
     Zhang et al., "DTFD-MIL: Double-Tier Feature Distillation Multiple Instance
     Learning for Histopathology Whole Slide Image Classification", CVPR 2022.
 
 Architecture Overview:
-    Tier 1 (Instance-Level): Operates on individual patches to generate attention
-    scores and pseudo-labels. Consists of instance classifier and attention module.
+    Tier 1 (Patch-to-Pseudobag): Gated Attention aggregates patches within each
+    pseudo-bag into a single representation. Instance classifier provides auxiliary
+    supervision.
 
-    Tier 2 (Bag-Level): Uses attention-based aggregation (Gated Attention) to
-    combine distilled features from pseudo-bags for final bag-level prediction.
+    Tier 2 (Pseudobag-to-Bag): Gated Attention aggregates pseudo-bag representations
+    into a final bag-level prediction.
 
-Key Features:
-    - Pseudo-bag generation during training to increase effective batch size
-    - Two-tier feature distillation for better instance-level feature learning
-    - Gated attention mechanism for weighted aggregation
+Key Differences from Standard DTFD:
+    - Uses Gated Attention for BOTH tiers instead of feature distillation (MaxMin/AFS)
+    - Deterministic pseudo-bag splitting during evaluation for reproducible inference
+    - Preserves all morphological features (no instance selection/distillation)
 """
 
 import torch
@@ -144,37 +145,35 @@ class InstanceClassifier(nn.Module):
 
 class DTFDMIL(nn.Module):
     """
-    Double-Tier Feature Distillation MIL model.
+    Two-Tier Pseudo-Bag Hierarchical MIL (formerly custom DTFD-MIL).
+    
+    This architecture addresses limited bag sizes by splitting bags into pseudo-bags.
+    Unlike standard DTFD which uses feature distillation (MaxMin/AFS) to select instances,
+    this implementation uses Gated Attention for BOTH Tier-1 (patch-to-pseudobag) and 
+    Tier-2 (pseudobag-to-bag) aggregation. This preserves all morphological features 
+    which is crucial for differentiating complex MPN subtypes like ET and PV.
 
-    The model consists of two tiers:
-        - Tier 1: Instance-level classifier + Attention for pseudo-bag aggregation
-        - Tier 2: Bag-level classifier using distilled features from pseudo-bags
-
-    During training:
-        1. Split the original bag into K pseudo-bags
-        2. Tier 1 generates attention-weighted representations for each pseudo-bag
-        3. Tier 2 aggregates pseudo-bag representations for final prediction
-
-    During inference:
-        The full bag is processed through both tiers.
+    Note on Auxiliary Supervision: The pseudo-bag auxiliary logits are generated 
+    using the shared `bag_classifier` rather than a separate Tier-1 classifier, 
+    making this a lightweight, highly stable variant.
 
     Args:
         input_dim: Dimension of input features from backbone (e.g., 768 for TITAN).
-        num_classes: Number of output classes (default: 3 for ET/PV/PMF).
+        num_classes: Number of output classes (default: 2 for ET vs PV).
         proj_dim: Dimension after projection layer (default: 512).
         hidden_dim: Hidden dimension for attention (default: 128).
         dropout: Dropout probability (default: 0.25).
-        num_pseudo_bags: Number of pseudo-bags to create during training (default: 8).
+        num_pseudo_bags: Number of pseudo-bags to create (default: 3).
     """
 
     def __init__(
         self,
         input_dim: int,
-        num_classes: int = 3,
+        num_classes: int = 2,
         proj_dim: int = 512,
         hidden_dim: int = 128,
         dropout: float = 0.25,
-        num_pseudo_bags: int = 8,
+        num_pseudo_bags: int = 3,
     ) -> None:
         super().__init__()
 
@@ -216,40 +215,38 @@ class DTFDMIL(nn.Module):
             nn.Linear(hidden_dim, num_classes),
         )
 
-    def _create_pseudo_bags(
-        self,
-        features: torch.Tensor,
-        num_pseudo_bags: int,
-    ) -> List[torch.Tensor]:
+    def _normalize_bag_input(self, features: torch.Tensor) -> torch.Tensor:
+        """Safely handle [N, D] or [1, N, D] inputs."""
+        if features.dim() == 3:
+            assert features.size(0) == 1, "Only batch size 1 is supported for pseudo-bag logic."
+            features = features.squeeze(0)
+        assert features.dim() == 2, f"Expected 2D tensor, got {features.dim()}D"
+        return features
+
+    def _create_pseudo_bags(self, features: torch.Tensor, num_pseudo_bags: int) -> List[torch.Tensor]:
         """
-        Split a bag of instances into multiple pseudo-bags.
-
-        Uses random shuffling and even splitting to create diverse pseudo-bags.
-
-        Args:
-            features: Instance features [N, D].
-            num_pseudo_bags: Number of pseudo-bags to create.
-
-        Returns:
-            List of pseudo-bag tensors, each [N_k, D].
+        Create pseudo-bags.
+        CRITICAL FIX: Deterministic split for BOTH train and eval during baseline stabilization.
+        Clamps effective_k to ensure we don't request more bags than instances.
         """
         N = features.size(0)
 
-        # Shuffle instance indices
-        indices = torch.randperm(N, device=features.device)
+        # Guard for num_pseudo_bags > N
+        effective_k = min(num_pseudo_bags, N)
+        effective_k = max(effective_k, 1)
+
+        # Deterministic split (Parity between train/eval)
+        indices = torch.arange(N, device=features.device)
         shuffled = features[indices]
 
-        # Calculate instances per pseudo-bag
-        instances_per_bag = N // num_pseudo_bags
-        remainder = N % num_pseudo_bags
+        instances_per_bag = N // effective_k
+        remainder = N % effective_k
 
         pseudo_bags = []
         start = 0
-        for i in range(num_pseudo_bags):
-            # Distribute remainder instances
+        for i in range(effective_k):
             extra = 1 if i < remainder else 0
             end = start + instances_per_bag + extra
-
             if end > start:  # Only add non-empty bags
                 pseudo_bags.append(shuffled[start:end])
             start = end
@@ -260,20 +257,10 @@ class DTFDMIL(nn.Module):
         self,
         features: torch.Tensor,
         return_attention: bool = False,
-    ) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
-        """
-        Tier 1 forward pass.
-
-        Args:
-            features: Projected features [N, D] or [B, N, D].
-            return_attention: Whether to return attention weights.
-
-        Returns:
-            instance_logits: Instance-level predictions [N, C] or [B, N, C].
-            aggregated: Attention-weighted bag representation [D] or [B, D].
-            attention: Attention weights (if return_attention=True).
-        """
-        instance_logits = self.instance_classifier(features)
+        compute_instance: bool = False,
+    ) -> Tuple[Optional[torch.Tensor], torch.Tensor, Optional[torch.Tensor]]:
+        """Tier 1 forward pass with optional instance classification."""
+        instance_logits = self.instance_classifier(features) if compute_instance else None
         aggregated, attention = self.tier1_attention(features, return_attention)
         return instance_logits, aggregated, attention
 
@@ -302,44 +289,31 @@ class DTFDMIL(nn.Module):
     def forward_training(
         self,
         features: torch.Tensor,
+        compute_instance: bool = False,
     ) -> Tuple[torch.Tensor, torch.Tensor, List[torch.Tensor]]:
-        """
-        Forward pass during training with pseudo-bag creation.
-
-        Args:
-            features: Raw instance features [N, D] (single bag, no batch dim).
-
-        Returns:
-            bag_logits: Final bag-level logits [C].
-            pseudo_bag_logits: Tier 1 logits for each pseudo-bag [K, C].
-            instance_logits_list: List of instance logits per pseudo-bag.
-        """
-        # Project features
-        projected = self.projection(features)  # [N, proj_dim]
-
-        # Create pseudo-bags
+        # Safely normalize input
+        features = self._normalize_bag_input(features)
+        projected = self.projection(features)
         pseudo_bags = self._create_pseudo_bags(projected, self.num_pseudo_bags)
 
-        # Tier 1: Process each pseudo-bag
         pseudo_bag_representations = []
         pseudo_bag_logits = []
         instance_logits_list = []
 
         for pseudo_bag in pseudo_bags:
-            inst_logits, aggregated, _ = self.forward_tier1(pseudo_bag)
-            instance_logits_list.append(inst_logits)
+            inst_logits, aggregated, _ = self.forward_tier1(pseudo_bag, compute_instance=compute_instance)
+            if inst_logits is not None:
+                instance_logits_list.append(inst_logits)
             pseudo_bag_representations.append(aggregated)
 
-            # Pseudo-bag level prediction (for auxiliary loss)
             pseudo_logits = self.bag_classifier(aggregated)
             pseudo_bag_logits.append(pseudo_logits)
 
-        # Stack pseudo-bag representations [K, D]
         pseudo_bag_features = torch.stack(pseudo_bag_representations, dim=0)
-        pseudo_bag_logits = torch.stack(pseudo_bag_logits, dim=0)  # [K, C]
+        pseudo_bag_logits = torch.stack(pseudo_bag_logits, dim=0)
 
-        # Tier 2: Aggregate pseudo-bags
-        bag_logits, _ = self.forward_tier2(pseudo_bag_features)  # [C]
+        tier2_aggregated, _ = self.tier2_attention(pseudo_bag_features)
+        bag_logits = self.bag_classifier(tier2_aggregated)
 
         return bag_logits, pseudo_bag_logits, instance_logits_list
 
@@ -347,49 +321,35 @@ class DTFDMIL(nn.Module):
         self,
         features: torch.Tensor,
         return_attention: bool = False,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
+        **kwargs,
+    ) -> Tuple[torch.Tensor, None, Optional[torch.Tensor]]:
         """
-        Standard forward pass (for inference).
-
-        Processes the full bag through both tiers without pseudo-bag splitting.
-
-        Args:
-            features: Instance features [B, N, D] or [N, D].
-            return_attention: Whether to return attention weights.
-
-        Returns:
-            bag_logits: Bag-level predictions [B, C] or [C].
-            tier1_attention: Tier 1 attention weights (if return_attention).
-            tier2_attention: Tier 2 attention weights (if return_attention).
+        CRITICAL FIX: Now matches `forward_training` by properly using pseudo-bags 
+        and Tier-2 aggregation during inference.
         """
-        # Handle both batched and unbatched input
-        squeeze_output = False
-        if features.dim() == 2:
-            features = features.unsqueeze(0)
-            squeeze_output = True
+        # Safely normalize input
+        squeeze_output = (features.dim() == 2)
+        features = self._normalize_bag_input(features)
 
-        B, N, D = features.shape
+        projected = self.projection(features)
+        pseudo_bags = self._create_pseudo_bags(projected, self.num_pseudo_bags)
 
-        # Project features
-        projected = self.projection(features)  # [B, N, proj_dim]
+        pseudo_bag_representations = []
+        for pseudo_bag in pseudo_bags:
+            _, aggregated, _ = self.forward_tier1(pseudo_bag, compute_instance=False)
+            pseudo_bag_representations.append(aggregated)
 
-        # Tier 1: Get instance-level aggregation
-        _, tier1_aggregated, tier1_attn = self.forward_tier1(
-            projected, return_attention
-        )  # [B, proj_dim], [B, N]
+        pseudo_bag_features = torch.stack(pseudo_bag_representations, dim=0)
 
-        # For inference, use Tier 1 aggregation directly (no pseudo-bags)
-        # The tier2 attention operates on the single aggregated representation
-        bag_logits = self.bag_classifier(tier1_aggregated)  # [B, C]
+        tier2_aggregated, tier2_attn = self.tier2_attention(pseudo_bag_features, return_attention)
+        logits = self.bag_classifier(tier2_aggregated)
 
-        if squeeze_output:
-            bag_logits = bag_logits.squeeze(0)
-            if tier1_attn is not None:
-                tier1_attn = tier1_attn.squeeze(0)
+        if not squeeze_output:
+            logits = logits.unsqueeze(0)
+            if tier2_attn is not None:
+                tier2_attn = tier2_attn.unsqueeze(0)
 
-        if return_attention:
-            return bag_logits, tier1_attn, None
-        return bag_logits, None, None
+        return logits, None, tier2_attn
 
 
 def compute_dtfd_loss(
@@ -398,8 +358,8 @@ def compute_dtfd_loss(
     instance_logits_list: List[torch.Tensor],
     bag_label: int,
     criterion: nn.Module,
-    tier1_weight: float = 0.5,
-    instance_weight: float = 0.2,
+    tier1_weight: float = 0.0,
+    instance_weight: float = 0.0,
 ) -> Tuple[torch.Tensor, dict]:
     """
     Compute the combined DTFD-MIL loss.
@@ -425,8 +385,12 @@ def compute_dtfd_loss(
     device = bag_logits.device
     label_tensor = torch.tensor([bag_label], device=device)
 
+    # CRITICAL FIX: Ensure bag_logits is [1, C] before criterion
+    if bag_logits.dim() == 1:
+        bag_logits = bag_logits.unsqueeze(0)
+
     # Bag-level loss (main supervision)
-    bag_loss = criterion(bag_logits.unsqueeze(0), label_tensor)
+    bag_loss = criterion(bag_logits, label_tensor)
 
     # Pseudo-bag loss (auxiliary)
     K = pseudo_bag_logits.size(0)

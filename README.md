@@ -61,6 +61,7 @@
 `python src/data/preprocess.py --stain he --patch_size 224 --step_size 112 --output_dir data/processed_subtype`
 `python src/data/preprocess.py --stain he --patch_size 224 --step_size 112 --output_dir data/processed_subtype --crop_top 57 --crop_bottom 40 --use_od_filter --save_rejected`
 `python src/data/preprocess.py --stain he --patch_size 224 --step_size 112 --output_dir data/processed_subtype --crop_top 57 --crop_bottom 40 --use_od_filter --save_rejected --tissue_threshold 0.12 --min_tissue_ratio 0.3`
+`python src/data/preprocess.py --stain reti --patch_size 224 --step_size 112 --output_dir data/processed_subtype --crop_top 57 --crop_bottom 40 --use_od_filter --save_rejected --tissue_threshold 0.05 --min_tissue_ratio 0.10`
 
 `python src/janitor/run_janitor.py --task grading --model_path experiments/janitor_grading_20260202_143052/janitor_model_grading.pth`
 
@@ -125,7 +126,7 @@
 
  `python src/eval_hierarchical_fusion.py \
   --ckpt_stage1 experiments/pmf_vs_nonpmf_multi_branch_uni2_20260314_121233/best_pmf_vs_nonpmf_multi_branch_uni2.pth \
-  --ckpt_stage2 experiments/et_vs_pv_dtfd_titan_20260309_165935/best_et_vs_pv_dtfd_titan.pth \
+  --ckpt_stage2 experiments/et_vs_pv_dtfd_titan_20260316_151210/best_et_vs_pv_dtfd_titan.pth \
   --save_csv`
 
  `python src/tools/sanity_check_info.py \

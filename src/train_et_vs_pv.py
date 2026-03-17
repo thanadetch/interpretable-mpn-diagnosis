@@ -203,9 +203,12 @@ def train_one_epoch(
             features = features.to(device)  # [N, D]
             label = labels[i].item()
 
-            if model_type == "dtfd":
+            if model_type in ("dtfd", "standard_dtfd"):
+                # Only compute instance branch if weight is > 0
                 bag_logits, pseudo_bag_logits, instance_logits_list = (
-                    model.forward_training(features)
+                    model.forward_training(features, compute_instance=(instance_weight > 0.0))
+                    if model_type == "dtfd"
+                    else model.forward_training(features)
                 )
                 loss, loss_dict = compute_dtfd_loss(
                     bag_logits=bag_logits,
@@ -246,7 +249,7 @@ def train_one_epoch(
 
             batch_loss = batch_loss + loss
 
-            pred = (bag_logits if model_type == "dtfd" else logits).argmax().item()
+            pred = (bag_logits if model_type in ("dtfd", "standard_dtfd") else logits).argmax().item()
             batch_correct += int(pred == label)
             all_preds.append(pred)
             all_labels.append(label)
@@ -430,6 +433,7 @@ def parse_args() -> argparse.Namespace:
         choices=[
             "simple",
             "dtfd",
+            "standard_dtfd",
             "clam_sb",
             "hybrid",
             "explicit",
@@ -456,20 +460,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--num_pseudo_bags",
         type=int,
-        default=8,
-        help="Number of pseudo-bags for DTFD-MIL (default: 8).",
+        default=3,
+        help="Number of pseudo-bags for DTFD-MIL (default: 3).",
     )
     parser.add_argument(
         "--tier1_weight",
         type=float,
-        default=0.5,
-        help="Weight for pseudo-bag auxiliary loss (default: 0.5).",
+        default=0.0,
+        help="Weight for pseudo-bag auxiliary loss (default: 0.0).",
     )
     parser.add_argument(
         "--instance_weight",
         type=float,
-        default=0.2,
-        help="Weight for instance-level loss (default: 0.2). Set to 0.0 to disable.",
+        default=0.0,
+        help="Weight for instance-level loss (default: 0.0). Set to 0.0 to disable.",
     )
     parser.add_argument(
         "--topk",
@@ -716,6 +720,13 @@ def main() -> None:
             input_dim=input_dim,
             num_classes=num_classes,
             topk_focal=5,
+        ).to(device)
+    elif args.model_type == "standard_dtfd":
+        from models.standard_dtfd import StandardDTFDMIL
+        model = StandardDTFDMIL(
+            input_dim=input_dim,
+            num_classes=num_classes,
+            num_pseudo_bags=args.num_pseudo_bags,
         ).to(device)
     elif args.model_type == "residual_metric":
         model = ResidualMetricMIL(
