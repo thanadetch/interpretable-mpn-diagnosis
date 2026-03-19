@@ -492,6 +492,10 @@ def main() -> None:
     input_dir = Path(args.input_dir)
     output_dir = Path(args.output_dir)
 
+    # Override output directory for reti stain -> processed_grading
+    if args.stain == "reti":
+        output_dir = output_dir.parent / "processed_grading"
+
     # Validate input directory
     if not input_dir.exists():
         print(f"Error: Input directory does not exist: {input_dir}")

@@ -126,3 +126,67 @@ class MPNBagDatasetFull(Dataset):
     def get_slide_path(self, idx: int) -> Path:
         """Return the path to the .pt file for a given index."""
         return self.samples[idx][0]
+
+
+class GradingBagDatasetFull(Dataset):
+    """
+    PyTorch Dataset for attention-based MIL on Reticulin Fibrosis Grading.
+
+    Extracts fibrosis grade labels (G0, G1, G2, G3) from the parent folder
+    name of each .pt file, rather than using the MPN CLASS_MAP.
+
+    Walks ``{features_dir}/**/*.pt`` using rglob and assigns labels based on
+    whether the parent folder name contains 'G0', 'G1', 'G2', or 'G3'.
+
+    Returns 3 items per sample: (features, label, slide_id).
+
+    Args:
+        features_dir: Root directory containing feature .pt files.
+    """
+
+    GRADE_MAP = {"G0": 0, "G1": 1, "G2": 2, "G3": 3}
+
+    def __init__(self, features_dir: Path) -> None:
+        self.samples: List[Tuple[Path, int]] = []
+
+        for pt_file in sorted(Path(features_dir).rglob("*.pt")):
+            folder_name = pt_file.parent.name
+            label = self._extract_grade(folder_name)
+            if label is not None:
+                self.samples.append((pt_file, label))
+
+    def _extract_grade(self, folder_name: str):
+        """Return integer label if folder name contains a grade string."""
+        for grade, label in self.GRADE_MAP.items():
+            if grade in folder_name:
+                return label
+        return None
+
+    def __len__(self) -> int:
+        return len(self.samples)
+
+    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, int, str]:
+        """
+        Returns:
+            features: Full patch features [N_patches, Dim].
+            label:    Integer class label (0=G0, 1=G1, 2=G2, 3=G3).
+            slide_id: Slide identifier (filename without extension).
+        """
+        pt_path, label = self.samples[idx]
+        data = torch.load(pt_path, map_location="cpu", weights_only=False)
+
+        if isinstance(data, dict):
+            feat = data["feats"]
+        else:
+            feat = data
+
+        slide_id = pt_path.stem
+        return feat, label, slide_id
+
+    def get_labels(self) -> List[int]:
+        """Return all labels (useful for stratified splitting / weighted sampling)."""
+        return [label for _, label in self.samples]
+
+    def get_slide_path(self, idx: int) -> Path:
+        """Return the path to the .pt file for a given index."""
+        return self.samples[idx][0]
