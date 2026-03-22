@@ -22,6 +22,7 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.utils.data import DataLoader, Subset
@@ -34,11 +35,12 @@ from sklearn.metrics import (
 from tqdm import tqdm
 
 from core.config import CLASS_MAP, CLASS_MAP_INV, EXPERIMENTS_DIR, SEED
-from data.bag_dataset import MPNBagDatasetFull
+from data.bag_dataset import MPNBagDatasetFull, MultiTaskBagDataset
 from models.clam import CLAM_SB
 from models.dtfd_mil import DTFDMIL, compute_dtfd_loss
 from models.explicit_mil import ExplicitMetricsMIL
 from models.hybrid_mil import HybridMIL
+from models.multi_task_mil import MultiTaskMIL
 from models.residual_metric_mil import ResidualMetricMIL
 from models.simple_mil import SimpleGatedMIL
 from models.dual_stream_mil import DualStreamMIL
@@ -170,6 +172,17 @@ def collate_bags(batch):
     return features_list, labels, slide_ids, metrics_list
 
 
+def collate_bags_multitask(batch):
+    """Collate for MultiTaskBagDataset: also returns aux labels and confidence weights."""
+    features_list = [item[0] for item in batch]
+    labels = torch.tensor([item[1] for item in batch])
+    slide_ids = [item[2] for item in batch]
+    metrics_list = [item[3] for item in batch]
+    aux_labels = torch.tensor([item[4] for item in batch], dtype=torch.long)
+    w_confs = torch.tensor([item[5] for item in batch], dtype=torch.float)
+    return features_list, labels, slide_ids, metrics_list, aux_labels, w_confs
+
+
 # ── training ─────────────────────────────────────────────────────────────
 def train_one_epoch(
     model: nn.Module,
@@ -183,8 +196,10 @@ def train_one_epoch(
     bag_weight: float = 0.7,
     inst_weight: float = 0.3,
     attention_bias: bool = False,
+    cellularity_weight: float = 0.0,
+    multi_task: bool = False,
 ) -> Tuple[float, float, float, List[float], float, dict]:
-    """Train for one epoch. Handles 'simple', 'dtfd', and 'clam_sb' model types."""
+    """Train for one epoch. Handles 'simple', 'dtfd', 'clam_sb', and 'multi_task' model types."""
     model.train()
     running_loss = 0.0
     correct = 0
@@ -194,7 +209,15 @@ def train_one_epoch(
     all_labels = []
 
     pbar = tqdm(loader, desc="  Train", leave=False)
-    for features_list, labels, slide_ids, metrics_list in pbar:
+    for batch in pbar:
+        # Unpack batch: multi-task batches have 2 extra fields
+        if multi_task:
+            features_list, labels, slide_ids, metrics_list, aux_labels, w_confs = batch
+            aux_labels = aux_labels.to(device)
+            w_confs = w_confs.to(device)
+        else:
+            features_list, labels, slide_ids, metrics_list = batch
+
         labels = labels.to(device)
         batch_loss = torch.tensor(0.0, device=device, requires_grad=True)
         batch_correct = 0
@@ -203,7 +226,25 @@ def train_one_epoch(
             features = features.to(device)  # [N, D]
             label = labels[i].item()
 
-            if model_type in ("dtfd", "standard_dtfd"):
+            if model_type == "multi_task":
+                subtype_logits, cell_logits, _ = model(features)
+                label_tensor = torch.tensor([label], device=device)
+                loss_subtype = criterion(subtype_logits.unsqueeze(0), label_tensor)
+                loss_sums["subtype_loss"] += loss_subtype.item()
+                loss = loss_subtype
+
+                # Auxiliary cellularity loss (only for valid labels)
+                if multi_task and aux_labels[i].item() != -1:
+                    aux_target = aux_labels[i : i + 1]
+                    loss_cell = F.cross_entropy(
+                        cell_logits.unsqueeze(0), aux_target, reduction="none"
+                    )
+                    weighted_cell = loss_cell * w_confs[i]
+                    loss = loss + cellularity_weight * weighted_cell.squeeze()
+                    loss_sums["cell_loss"] += weighted_cell.item()
+
+                logits = subtype_logits
+            elif model_type in ("dtfd", "standard_dtfd"):
                 # Only compute instance branch if weight is > 0
                 bag_logits, pseudo_bag_logits, instance_logits_list = (
                     model.forward_training(features, compute_instance=(instance_weight > 0.0))
@@ -327,9 +368,11 @@ def validate_and_evaluate(
     all_preds = []
     all_labels = []
 
-    for features_list, labels, slide_ids, metrics_list in tqdm(
-        loader, desc=desc, leave=False
-    ):
+    for batch in tqdm(loader, desc=desc, leave=False):
+        # Handle both standard and multi-task batches
+        features_list, labels = batch[0], batch[1]
+        slide_ids = batch[2]
+        metrics_list = batch[3] if len(batch) > 3 else [{} for _ in features_list]
         labels = labels.to(device)
 
         for i, features in enumerate(features_list):
@@ -344,7 +387,10 @@ def validate_and_evaluate(
                 else None
             )
 
-            if isinstance(
+            if isinstance(model, MultiTaskMIL):
+                subtype_logits, _, _ = model(features)
+                logits = subtype_logits
+            elif isinstance(
                 model, (SimpleGatedMIL, ExplicitMetricsMIL, ResidualMetricMIL)
             ):
                 logits, _, _ = model(features, return_attention=False, metrics=metrics)
@@ -440,6 +486,7 @@ def parse_args() -> argparse.Namespace:
             "residual_metric",
             "dual_stream",
             "multi_branch",
+            "multi_task",
         ],
         help="MIL model type. Default: simple.",
     )
@@ -542,6 +589,20 @@ def parse_args() -> argparse.Namespace:
         help="Stop training after this many epochs without val macro recall improvement (default: 15).",
     )
 
+    # Multi-task auxiliary supervision
+    parser.add_argument(
+        "--cellularity_csv",
+        type=str,
+        default=None,
+        help="Path to expert metrics CSV for auxiliary cellularity supervision.",
+    )
+    parser.add_argument(
+        "--cellularity_weight",
+        type=float,
+        default=0.3,
+        help="Weight for the auxiliary cellularity loss (default: 0.3).",
+    )
+
     return parser.parse_args()
 
 
@@ -588,8 +649,13 @@ def main() -> None:
     log(f"Device: {device}", log_file)
 
     # ── Data ──────────────────────────────────────────────────────────
+    multi_task = args.model_type == "multi_task" and args.cellularity_csv is not None
     log(f"\nLoading {display_name} features from: {features_dir}", log_file)
-    full_dataset = MPNBagDatasetFull(features_dir)
+    if multi_task:
+        log(f"  Multi-task mode: cellularity CSV = {args.cellularity_csv}", log_file)
+        full_dataset = MultiTaskBagDataset(features_dir, cellularity_csv=args.cellularity_csv)
+    else:
+        full_dataset = MPNBagDatasetFull(features_dir)
     log(f"  Total bags: {len(full_dataset)}", log_file)
 
     # Split using all 3 original classes (identical patient distribution)
@@ -657,13 +723,15 @@ def main() -> None:
         replacement=True,
     )
 
+    collate_fn = collate_bags_multitask if multi_task else collate_bags
+
     train_loader = DataLoader(
         Subset(full_dataset, train_idx),
         batch_size=args.batch_size,
         sampler=patient_balanced_sampler,
         num_workers=args.num_workers,
         pin_memory=True,
-        collate_fn=collate_bags,
+        collate_fn=collate_fn,
     )
     val_loader = DataLoader(
         Subset(full_dataset, val_idx),
@@ -671,7 +739,7 @@ def main() -> None:
         shuffle=False,
         num_workers=args.num_workers,
         pin_memory=True,
-        collate_fn=collate_bags,
+        collate_fn=collate_fn,
     )
     test_loader = DataLoader(
         Subset(full_dataset, test_idx),
@@ -679,7 +747,7 @@ def main() -> None:
         shuffle=False,
         num_workers=args.num_workers,
         pin_memory=True,
-        collate_fn=collate_bags,
+        collate_fn=collate_fn,
     )
 
     # ── Model ─────────────────────────────────────────────────────────
@@ -727,6 +795,11 @@ def main() -> None:
             input_dim=input_dim,
             num_classes=num_classes,
             num_pseudo_bags=args.num_pseudo_bags,
+        ).to(device)
+    elif args.model_type == "multi_task":
+        model = MultiTaskMIL(
+            input_dim=input_dim,
+            num_classes=num_classes,
         ).to(device)
     elif args.model_type == "residual_metric":
         model = ResidualMetricMIL(
@@ -824,6 +897,8 @@ def main() -> None:
             bag_weight=args.bag_weight,
             inst_weight=args.inst_weight,
             attention_bias=args.attention_bias,
+            cellularity_weight=args.cellularity_weight,
+            multi_task=multi_task,
         )
 
         # Validate
@@ -855,6 +930,14 @@ def main() -> None:
             f"| {val_f1:<5.3f} | {val_macro_recall:<5.3f} | {fmt_recall(val_recall)}",
             log_file,
         )
+        # Log multi-task loss components
+        if multi_task and loss_components:
+            sub_l = loss_components.get("subtype_loss", 0.0)
+            cel_l = loss_components.get("cell_loss", 0.0)
+            log(
+                f"     | Losses: subtype={sub_l:.4f}  cell={cel_l:.4f}",
+                log_file,
+            )
         log(sep, log_file)
 
         scheduler.step()

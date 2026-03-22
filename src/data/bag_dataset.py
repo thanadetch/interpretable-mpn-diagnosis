@@ -5,14 +5,17 @@ Loads pre-extracted feature bags (.pt files) produced by backbone extractors
 (TITAN, UNI2-h, Virchow2). Each .pt file represents one WSI and contains
 a tensor of shape [N_patches, Dim].
 
-Two dataset variants are provided:
+Dataset variants:
     - MPNBagDataset: Applies mean pooling to produce [Dim] vector per WSI.
     - MPNBagDatasetFull: Returns full [N_patches, Dim] tensor (for attention-based MIL).
+    - MultiTaskBagDataset: Like MPNBagDatasetFull but also returns auxiliary
+      cellularity labels and confidence weights from an expert metrics CSV.
 """
 
 from pathlib import Path
-from typing import List, Tuple
+from typing import Dict, List, Optional, Tuple
 
+import pandas as pd
 import torch
 from torch.utils.data import Dataset
 
@@ -190,3 +193,93 @@ class GradingBagDatasetFull(Dataset):
     def get_slide_path(self, idx: int) -> Path:
         """Return the path to the .pt file for a given index."""
         return self.samples[idx][0]
+
+
+CELLULARITY_MAP: Dict[str, int] = {
+    "Hypocellular": 0,
+    "Normocellular": 1,
+    "Hypercellular / Panmyelosis": 2,
+}
+
+
+class MultiTaskBagDataset(Dataset):
+    """
+    Bag-level dataset for multi-task MIL with auxiliary cellularity supervision.
+
+    Extends MPNBagDatasetFull by optionally loading expert cellularity labels
+    from a CSV file. Each sample returns the feature tensor, the primary
+    subtype label, an auxiliary cellularity label, and a confidence weight.
+
+    Args:
+        features_dir: Root directory containing per-class feature folders.
+        cellularity_csv: Optional path to the expert metrics CSV. If None,
+            all samples return aux_label=-1 and w_conf=0.0.
+    """
+
+    def __init__(
+        self,
+        features_dir: Path,
+        cellularity_csv: Optional[str] = None,
+    ) -> None:
+        self.samples: List[Tuple[Path, int]] = []
+
+        for class_name, label in CLASS_MAP.items():
+            class_dir = features_dir / class_name
+            if not class_dir.exists():
+                continue
+            for pt_file in sorted(class_dir.rglob("*.pt")):
+                self.samples.append((pt_file, label))
+
+        # Build cellularity lookup: "Subtype/PatientID/stem" -> (int_label, w_conf)
+        self.cell_lookup: Dict[str, Tuple[int, float]] = {}
+        if cellularity_csv is not None:
+            df = pd.read_csv(cellularity_csv)
+            for _, row in df.iterrows():
+                full_path = Path(row["Full_Path"])
+                # Key: e.g. "ET/ET1 G1/1"
+                key = f"{full_path.parts[-3]}/{full_path.parts[-2]}/{full_path.stem}"
+                cell_label = CELLULARITY_MAP.get(row["Cellularity"], -1)
+                if cell_label == -1:
+                    continue
+                w_conf = float(row["Cellularity_Confidence"]) / 10.0
+                self.cell_lookup[key] = (cell_label, w_conf)
+
+    def __len__(self) -> int:
+        return len(self.samples)
+
+    def __getitem__(
+        self, idx: int
+    ) -> Tuple[torch.Tensor, int, str, dict, int, float]:
+        """
+        Returns:
+            features: Full patch features [N_patches, Dim].
+            label:    Integer class label.
+            slide_id: Slide identifier (filename without extension).
+            metrics:  Dict of patch-level metrics (from extraction).
+            aux_label: Cellularity label (0/1/2) or -1 if unavailable.
+            w_conf:   Confidence weight (0.0 if unavailable).
+        """
+        pt_path, label = self.samples[idx]
+        data = torch.load(pt_path, map_location="cpu", weights_only=False)
+
+        if isinstance(data, dict):
+            feat = data["feats"]
+            metrics = data.get("metrics", {})
+        else:
+            feat = data
+            metrics = {}
+
+        slide_id = pt_path.stem
+
+        # Lookup auxiliary cellularity label
+        # Key: "Subtype/PatientID/stem" derived from the .pt file path
+        class_name = pt_path.parts[-3]  # e.g. "ET"
+        patient_id = pt_path.parts[-2]  # e.g. "ET1 G1"
+        roi_key = f"{class_name}/{patient_id}/{pt_path.stem}"
+        aux_label, w_conf = self.cell_lookup.get(roi_key, (-1, 0.0))
+
+        return feat, label, slide_id, metrics, aux_label, w_conf
+
+    def get_labels(self) -> List[int]:
+        """Return all labels (useful for stratified splitting / weighted sampling)."""
+        return [label for _, label in self.samples]
