@@ -42,6 +42,8 @@ from models.clam import CLAM_SB
 from models.dtfd_mil import DTFDMIL, compute_dtfd_loss
 from models.explicit_mil import ExplicitMetricsMIL
 from models.hybrid_mil import HybridMIL
+from models.mean_max_pool_mil import MeanMaxPoolMIL
+from models.mean_pool_mil import MeanPoolMIL
 from models.residual_metric_mil import ResidualMetricMIL
 from models.simple_mil import SimpleGatedMIL
 from models.dual_stream_mil import DualStreamMIL
@@ -434,6 +436,8 @@ def parse_args() -> argparse.Namespace:
             "residual_metric",
             "dual_stream",
             "multi_branch",
+            "mean_pool",
+            "mean_max_pool",
         ],
         help="MIL model type: 'simple' | 'dtfd' | 'clam_sb' | 'hybrid' | 'explicit' | 'residual_metric' | 'dual_stream' | 'multi_branch'. Default: simple.",
     )
@@ -657,6 +661,16 @@ def main() -> None:
     elif args.model_type == "residual_metric":
         model = ResidualMetricMIL(
             input_dim=input_dim,
+            num_classes=num_classes,
+        ).to(device)
+    elif args.model_type == "mean_pool":
+        model = MeanPoolMIL(
+            vision_dim=input_dim,
+            num_classes=num_classes,
+        ).to(device)
+    elif args.model_type == "mean_max_pool":
+        model = MeanMaxPoolMIL(
+            vision_dim=input_dim,
             num_classes=num_classes,
         ).to(device)
     else:

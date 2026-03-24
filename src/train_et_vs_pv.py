@@ -34,15 +34,28 @@ from sklearn.metrics import (
 from tqdm import tqdm
 
 from core.config import CLASS_MAP, CLASS_MAP_INV, EXPERIMENTS_DIR, SEED
-from data.bag_dataset import MPNBagDatasetFull
+from data.bag_dataset import MPNBagDatasetFull, BagFusionDataset
+from models.bag_fusion_mil import BagFusionMIL
 from models.clam import CLAM_SB
+from models.csv_only_mil import CSVOnlyMIL
 from models.dtfd_mil import DTFDMIL, compute_dtfd_loss
+from models.early_fusion_mil import EarlyFusionMIL
 from models.explicit_mil import ExplicitMetricsMIL
 from models.hybrid_mil import HybridMIL
+from models.logit_prior_mil import LogitPriorFusionMIL
+from models.mean_max_pool_mil import MeanMaxPoolMIL
+from models.mean_pool_late_fusion_mil import MeanPoolLateFusionMIL
+from models.mean_pool_mil import MeanPoolMIL
 from models.residual_metric_mil import ResidualMetricMIL
 from models.simple_mil import SimpleGatedMIL
 from models.dual_stream_mil import DualStreamMIL
 from models.multi_branch_mil import MultiBranchMIL
+
+# Model types that require concept features from BagFusionDataset
+_CONCEPT_FUSION_TYPES = {
+    "bag_fusion", "early_fusion", "logit_prior",
+    "csv_only", "mean_pool_late_fusion",
+}
 
 # ── backbone configuration ───────────────────────────────────────────────
 BACKBONE_CONFIG: Dict[str, Dict] = {
@@ -170,6 +183,16 @@ def collate_bags(batch):
     return features_list, labels, slide_ids, metrics_list
 
 
+def collate_bags_fusion(batch):
+    """Custom collate function for BagFusionDataset (includes concept tensors)."""
+    features_list = [item[0] for item in batch]
+    labels = torch.tensor([item[1] for item in batch])
+    concept_list = [item[2] for item in batch]
+    slide_ids = [item[3] for item in batch]
+    metrics_list = [item[4] for item in batch]
+    return features_list, labels, concept_list, slide_ids, metrics_list
+
+
 # ── training ─────────────────────────────────────────────────────────────
 def train_one_epoch(
     model: nn.Module,
@@ -193,8 +216,15 @@ def train_one_epoch(
     all_preds = []
     all_labels = []
 
+    is_concept_fusion = model_type in _CONCEPT_FUSION_TYPES
+
     pbar = tqdm(loader, desc="  Train", leave=False)
-    for features_list, labels, slide_ids, metrics_list in pbar:
+    for batch in pbar:
+        if is_concept_fusion:
+            features_list, labels, concept_list, slide_ids, metrics_list = batch
+        else:
+            features_list, labels, slide_ids, metrics_list = batch
+            concept_list = None
         labels = labels.to(device)
         batch_loss = torch.tensor(0.0, device=device, requires_grad=True)
         batch_correct = 0
@@ -237,6 +267,12 @@ def train_one_epoch(
                     else None
                 )
                 logits, _, _ = model(features, metrics=metrics)
+                label_tensor = torch.tensor([label], device=device)
+                loss = criterion(logits.unsqueeze(0), label_tensor)
+                loss_sums["bag_loss"] += loss.item()
+            elif model_type in _CONCEPT_FUSION_TYPES:
+                concept_features = concept_list[i].to(device).unsqueeze(0)  # [1, 4]
+                logits, _, _ = model(features, concept_features)
                 label_tensor = torch.tensor([label], device=device)
                 loss = criterion(logits.unsqueeze(0), label_tensor)
                 loss_sums["bag_loss"] += loss.item()
@@ -327,9 +363,17 @@ def validate_and_evaluate(
     all_preds = []
     all_labels = []
 
-    for features_list, labels, slide_ids, metrics_list in tqdm(
-        loader, desc=desc, leave=False
-    ):
+    is_concept_fusion = isinstance(
+        model, (BagFusionMIL, EarlyFusionMIL, LogitPriorFusionMIL,
+                CSVOnlyMIL, MeanPoolLateFusionMIL)
+    )
+
+    for batch in tqdm(loader, desc=desc, leave=False):
+        if is_concept_fusion:
+            features_list, labels, concept_list, slide_ids, metrics_list = batch
+        else:
+            features_list, labels, slide_ids, metrics_list = batch
+            concept_list = None
         labels = labels.to(device)
 
         for i, features in enumerate(features_list):
@@ -344,7 +388,10 @@ def validate_and_evaluate(
                 else None
             )
 
-            if isinstance(
+            if is_concept_fusion:
+                concept_features = concept_list[i].to(device).unsqueeze(0)  # [1, 4]
+                logits, _, _ = model(features, concept_features)
+            elif isinstance(
                 model, (SimpleGatedMIL, ExplicitMetricsMIL, ResidualMetricMIL)
             ):
                 logits, _, _ = model(features, return_attention=False, metrics=metrics)
@@ -440,6 +487,13 @@ def parse_args() -> argparse.Namespace:
             "residual_metric",
             "dual_stream",
             "multi_branch",
+            "bag_fusion",
+            "early_fusion",
+            "logit_prior",
+            "mean_pool",
+            "mean_max_pool",
+            "csv_only",
+            "mean_pool_late_fusion",
         ],
         help="MIL model type. Default: simple.",
     )
@@ -504,6 +558,14 @@ def parse_args() -> argparse.Namespace:
         help="String to append to experiment directory, model checkpoint, and log file names.",
     )
 
+    # Late fusion alpha
+    parser.add_argument(
+        "--alpha",
+        type=float,
+        default=0.5,
+        help="Fixed alpha weight for logit fusion (default: 0.5).",
+    )
+
     # Attention logit bias (ablation)
     parser.add_argument(
         "--attention_bias",
@@ -540,6 +602,14 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=15,
         help="Stop training after this many epochs without val macro recall improvement (default: 15).",
+    )
+
+    # Bag-Fusion specific arguments
+    parser.add_argument(
+        "--cellularity_csv",
+        type=str,
+        default=None,
+        help="Path to cellularity CSV for bag_fusion model (required when --model_type=bag_fusion).",
     )
 
     return parser.parse_args()
@@ -589,7 +659,15 @@ def main() -> None:
 
     # ── Data ──────────────────────────────────────────────────────────
     log(f"\nLoading {display_name} features from: {features_dir}", log_file)
-    full_dataset = MPNBagDatasetFull(features_dir)
+    is_concept_fusion = args.model_type in _CONCEPT_FUSION_TYPES
+    if is_concept_fusion:
+        if args.cellularity_csv is None:
+            raise ValueError("--cellularity_csv is required for concept fusion models (bag_fusion, early_fusion)")
+        full_dataset = BagFusionDataset(features_dir, Path(args.cellularity_csv))
+        log(f"  Cellularity CSV: {args.cellularity_csv}", log_file)
+        log(f"  Concept lookup entries: {len(full_dataset.concept_lookup)}", log_file)
+    else:
+        full_dataset = MPNBagDatasetFull(features_dir)
     log(f"  Total bags: {len(full_dataset)}", log_file)
 
     # Split using all 3 original classes (identical patient distribution)
@@ -657,13 +735,15 @@ def main() -> None:
         replacement=True,
     )
 
+    collate_fn = collate_bags_fusion if is_concept_fusion else collate_bags
+
     train_loader = DataLoader(
         Subset(full_dataset, train_idx),
         batch_size=args.batch_size,
         sampler=patient_balanced_sampler,
         num_workers=args.num_workers,
         pin_memory=True,
-        collate_fn=collate_bags,
+        collate_fn=collate_fn,
     )
     val_loader = DataLoader(
         Subset(full_dataset, val_idx),
@@ -671,7 +751,7 @@ def main() -> None:
         shuffle=False,
         num_workers=args.num_workers,
         pin_memory=True,
-        collate_fn=collate_bags,
+        collate_fn=collate_fn,
     )
     test_loader = DataLoader(
         Subset(full_dataset, test_idx),
@@ -679,7 +759,7 @@ def main() -> None:
         shuffle=False,
         num_workers=args.num_workers,
         pin_memory=True,
-        collate_fn=collate_bags,
+        collate_fn=collate_fn,
     )
 
     # ── Model ─────────────────────────────────────────────────────────
@@ -720,6 +800,41 @@ def main() -> None:
             input_dim=input_dim,
             num_classes=num_classes,
             topk_focal=5,
+        ).to(device)
+    elif args.model_type == "bag_fusion":
+        model = BagFusionMIL(
+            vision_dim=input_dim,
+            num_classes=num_classes,
+        ).to(device)
+    elif args.model_type == "early_fusion":
+        model = EarlyFusionMIL(
+            vision_dim=input_dim,
+            num_classes=num_classes,
+        ).to(device)
+    elif args.model_type == "logit_prior":
+        model = LogitPriorFusionMIL(
+            vision_dim=input_dim,
+            num_classes=num_classes,
+        ).to(device)
+    elif args.model_type == "mean_pool":
+        model = MeanPoolMIL(
+            vision_dim=input_dim,
+            num_classes=num_classes,
+        ).to(device)
+    elif args.model_type == "mean_max_pool":
+        model = MeanMaxPoolMIL(
+            vision_dim=input_dim,
+            num_classes=num_classes,
+        ).to(device)
+    elif args.model_type == "csv_only":
+        model = CSVOnlyMIL(
+            num_classes=num_classes,
+        ).to(device)
+    elif args.model_type == "mean_pool_late_fusion":
+        model = MeanPoolLateFusionMIL(
+            vision_dim=input_dim,
+            num_classes=num_classes,
+            alpha=args.alpha,
         ).to(device)
     elif args.model_type == "standard_dtfd":
         from models.standard_dtfd import StandardDTFDMIL

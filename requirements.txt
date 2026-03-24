@@ -31,3 +31,4 @@ einops-exts==0.0.4
 transformers==4.46.0
 huggingface-hub
 pacmap
+google-generativeai

@@ -11,12 +11,20 @@ Two dataset variants are provided:
 """
 
 from pathlib import Path
-from typing import List, Tuple
+from typing import Dict, List, Tuple
 
+import pandas as pd
 import torch
 from torch.utils.data import Dataset
 
 from core.config import CLASS_MAP
+
+# Cellularity string → one-hot index mapping
+_CELLULARITY_ONEHOT: Dict[str, List[float]] = {
+    "Hypocellular": [1.0, 0.0, 0.0],
+    "Normocellular": [0.0, 1.0, 0.0],
+    "Hypercellular / Panmyelosis": [0.0, 0.0, 1.0],
+}
 
 
 class MPNBagDataset(Dataset):
@@ -182,6 +190,121 @@ class GradingBagDatasetFull(Dataset):
 
         slide_id = pt_path.stem
         return feat, label, slide_id
+
+    def get_labels(self) -> List[int]:
+        """Return all labels (useful for stratified splitting / weighted sampling)."""
+        return [label for _, label in self.samples]
+
+    def get_slide_path(self, idx: int) -> Path:
+        """Return the path to the .pt file for a given index."""
+        return self.samples[idx][0]
+
+
+class BagFusionDataset(Dataset):
+    """
+    PyTorch Dataset for concept-augmented MIL models.
+
+    Extends ``MPNBagDatasetFull`` by adding a binary concept tensor derived
+    from an expert-assessed cellularity CSV (``evaluate_cellularity.py``).
+
+    Each sample returns a 2-dimensional concept tensor:
+        [is_hyper, confidence_weight]
+
+    - ``is_hyper``: 1.0 if cellularity contains "Hypercellular", else 0.0.
+    - ``confidence_weight``: Cellularity_Confidence / 10.0 (normalised to [0, 1]).
+
+    Falls back to ``torch.zeros(2)`` for ROIs not found in the CSV.
+
+    Args:
+        features_dir: Root directory containing per-class feature folders.
+        cellularity_csv: Path to the expert metrics CSV with columns
+            ``Patient_ID``, ``Filename``, ``Cellularity``,
+            ``Cellularity_Confidence``.
+    """
+
+    def __init__(self, features_dir: Path, cellularity_csv: Path) -> None:
+        self.samples: List[Tuple[Path, int]] = []
+
+        for class_name, label in CLASS_MAP.items():
+            class_dir = features_dir / class_name
+            if not class_dir.exists():
+                continue
+            for pt_file in sorted(class_dir.rglob("*.pt")):
+                self.samples.append((pt_file, label))
+
+        # Build lookup: (Patient_ID, filename_stem) → concept tensor [2]
+        self.concept_lookup: Dict[Tuple[str, str], torch.Tensor] = {}
+        if cellularity_csv is not None and Path(cellularity_csv).exists():
+            df = pd.read_csv(cellularity_csv)
+            for _, row in df.iterrows():
+                patient_id = str(row["Patient_ID"])
+                fname_stem = Path(str(row["Filename"])).stem
+                cellularity = str(row.get("Cellularity", ""))
+                confidence = float(row.get("Cellularity_Confidence", 0))
+
+                is_hyper = 1.0 if "Hypercellular" in cellularity else 0.0
+                conf_weight = max(0.0, min(confidence / 10.0, 1.0))
+                concept = torch.tensor([is_hyper, conf_weight], dtype=torch.float32)
+                self.concept_lookup[(patient_id, fname_stem)] = concept
+
+        # ── Strict mapping validation ────────────────────────────────
+        matched = 0
+        unmatched_keys: List[Tuple[str, str]] = []
+        for pt_path, _ in self.samples:
+            key = (pt_path.parent.name, pt_path.stem)
+            if key in self.concept_lookup:
+                matched += 1
+            else:
+                unmatched_keys.append(key)
+        unmatched = len(unmatched_keys)
+
+        print(f"\n{'─' * 50}")
+        print(f"  BagFusionDataset Mapping Validation")
+        print(f"{'─' * 50}")
+        print(f"  Total Samples:   {len(self.samples)}")
+        print(f"  CSV Entries:     {len(self.concept_lookup)}")
+        print(f"  Matched:         {matched}")
+        print(f"  Unmatched:       {unmatched}")
+        if unmatched > 0:
+            print(f"  ⚠️ First {min(10, unmatched)} unmatched (patient_id, slide_id):")
+            for pid, sid in unmatched_keys[:10]:
+                print(f"     ({pid}, {sid})")
+        else:
+            print(f"  ✅ All samples matched!")
+        print(f"{'─' * 50}\n")
+
+    def __len__(self) -> int:
+        return len(self.samples)
+
+    def __getitem__(
+        self, idx: int
+    ) -> Tuple[torch.Tensor, int, torch.Tensor, str, dict]:
+        """
+        Returns:
+            features: Full patch features [N_patches, Dim].
+            label:    Integer class label.
+            concept_tensor: Binary concept vector [2] = [is_hyper, confidence].
+            slide_id: Slide identifier (filename without extension).
+            metrics:  Dict of patch-level metrics (from extraction).
+        """
+        pt_path, label = self.samples[idx]
+
+        data = torch.load(pt_path, map_location="cpu", weights_only=False)
+        if isinstance(data, dict):
+            feat = data["feats"]
+            metrics = data.get("metrics", {})
+        else:
+            feat = data
+            metrics = {}
+
+        slide_id = pt_path.stem
+        patient_id = pt_path.parent.name
+
+        # Look up concept tensor; fall back to zeros if not found
+        key = (patient_id, slide_id)
+        concept_tensor = self.concept_lookup.get(key, torch.zeros(2))
+
+        return feat, label, concept_tensor, slide_id, metrics
 
     def get_labels(self) -> List[int]:
         """Return all labels (useful for stratified splitting / weighted sampling)."""
