@@ -125,8 +125,8 @@
   --save_csv`
 
  `python src/eval_hierarchical_fusion.py \
-  --ckpt_stage1 experiments/pmf_vs_nonpmf_multi_branch_uni2_20260314_121233/best_pmf_vs_nonpmf_multi_branch_uni2.pth \
-  --ckpt_stage2 experiments/et_vs_pv_dtfd_titan_20260316_151210/best_et_vs_pv_dtfd_titan.pth \
+  --ckpt_stage1 experiments/pmf_vs_nonpmf_mean_pool_uni2_20260326_032242/best_pmf_vs_nonpmf_mean_pool_uni2.pth \
+  --ckpt_stage2 experiments/et_vs_pv_mean_pool_titan_20260326_091710/best_et_vs_pv_mean_pool_titan.pth \
   --save_csv`
 
  `python src/tools/sanity_check_info.py \

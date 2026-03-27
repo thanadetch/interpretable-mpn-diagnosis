@@ -41,6 +41,7 @@ from models.hybrid_mil import HybridMIL
 from models.residual_metric_mil import ResidualMetricMIL
 from models.simple_mil import SimpleGatedMIL
 from models.dual_stream_mil import DualStreamMIL
+from models.mean_pool_mil import MeanPoolMIL
 from models.multi_branch_mil import MultiBranchMIL
 
 # ── backbone configuration ───────────────────────────────────────────────
@@ -107,6 +108,8 @@ def build_model_from_ckpt(ckpt: dict, input_dim: int, device: torch.device) -> n
         model = DualStreamMIL(input_dim=input_dim, num_classes=num_classes, topk=k if k > 0 else 5)
     elif model_type == "multi_branch":
         model = MultiBranchMIL(input_dim=input_dim, num_classes=num_classes, topk_focal=ckpt_args.get("topk", 5))
+    elif model_type == "mean_pool":
+        model = MeanPoolMIL(vision_dim=input_dim, num_classes=num_classes)
     else:
         raise ValueError(f"Unknown model_type: {model_type}")
 

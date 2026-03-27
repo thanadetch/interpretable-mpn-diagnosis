@@ -46,6 +46,7 @@ from models.hybrid_mil import HybridMIL
 from models.simple_mil import SimpleGatedMIL
 from models.dual_stream_mil import DualStreamMIL
 from models.multi_branch_mil import MultiBranchMIL
+from models.mean_pool_mil import MeanPoolMIL
 
 # ── class definitions for reticulin fibrosis grading ─────────────────────
 CLASS_MAP = {"G0": 0, "G1": 1, "G2": 2, "G3": 3}
@@ -133,12 +134,12 @@ def patient_split(
 
     # Hardcoded splits: {label_idx: (n_val, n_test)}
     # G0: 4 total -> Val 1, Test 1, Train 2
-    # G1: 15 total -> Val 3, Test 3, Train 9
+    # G1: 15 total -> Val 2, Test 2, Train 11
     # G2: 18 total -> Val 3, Test 3, Train 12
     # G3: 5 total -> Val 1, Test 1, Train 3
     split_targets = {
         0: (1, 1),  # G0 -> Val 1, Test 1 (Leaves 2 for Train)
-        1: (3, 3),  # G1 -> Val 3, Test 3 (Leaves 9 for Train)
+        1: (2, 2),  # G1 -> Val 2, Test 2 (Leaves 11 for Train)
         2: (3, 3),  # G2 -> Val 3, Test 3 (Leaves 12 for Train)
         3: (1, 1),  # G3 -> Val 1, Test 1 (Leaves 3 for Train)
     }
@@ -186,6 +187,7 @@ def train_one_epoch(
     instance_weight: float = 0.2,
     bag_weight: float = 0.7,
     inst_weight: float = 0.3,
+    formulation: str = "classification",
 ) -> Tuple[float, float, float, List[float], float, float, dict]:
     """Train for one epoch. Handles 'simple', 'dtfd', and 'clam_sb' model types."""
     model.train()
@@ -233,13 +235,22 @@ def train_one_epoch(
             else:
                 # Standard MIL models (simple, hybrid, dual_stream, multi_branch)
                 logits, _, _ = model(features)
-                label_tensor = torch.tensor([label], device=device)
-                loss = criterion(logits.unsqueeze(0), label_tensor)
+                if formulation == "regression":
+                    label_tensor = torch.tensor(
+                        [label], dtype=torch.float32, device=device
+                    )
+                    loss = criterion(logits.view(-1), label_tensor)
+                else:
+                    label_tensor = torch.tensor([label], device=device)
+                    loss = criterion(logits.unsqueeze(0), label_tensor)
                 loss_sums["bag_loss"] += loss.item()
 
             batch_loss = batch_loss + loss
 
-            pred = (bag_logits if model_type == "dtfd" else logits).argmax().item()
+            if formulation == "regression":
+                pred = int(max(0, min(3, round(logits.view(-1).item()))))
+            else:
+                pred = (bag_logits if model_type == "dtfd" else logits).argmax().item()
             batch_correct += int(pred == label)
             all_preds.append(pred)
             all_labels.append(label)
@@ -300,6 +311,7 @@ def validate_and_evaluate(
     criterion: nn.Module,
     device: torch.device,
     desc: str = "  Val  ",
+    formulation: str = "classification",
 ) -> Tuple[float, float, float, List[float], float, float, str, str]:
     """
     Validate/Test a MIL model and return metric strings.
@@ -321,9 +333,7 @@ def validate_and_evaluate(
     all_preds = []
     all_labels = []
 
-    for features_list, labels, slide_ids in tqdm(
-        loader, desc=desc, leave=False
-    ):
+    for features_list, labels, slide_ids in tqdm(loader, desc=desc, leave=False):
         labels = labels.to(device)
 
         for i, features in enumerate(features_list):
@@ -335,17 +345,30 @@ def validate_and_evaluate(
             else:
                 logits, _, _ = model(features)
 
-            logits = logits.unsqueeze(0)
+            if formulation == "regression":
+                label_float = label.float()
+                loss = criterion(logits.view(-1), label_float)
+                running_loss += loss.item()
 
-            loss = criterion(logits, label)
-            running_loss += loss.item()
+                pred_val = int(max(0, min(3, round(logits.view(-1).item()))))
+                pred = torch.tensor([pred_val], device=device)
+                correct += pred.eq(label).sum().item()
+                total += 1
 
-            pred = logits.argmax(dim=1)
-            correct += pred.eq(label).sum().item()
-            total += 1
+                all_preds.append(pred_val)
+                all_labels.append(label.item())
+            else:
+                logits = logits.unsqueeze(0)
 
-            all_preds.append(pred.item())
-            all_labels.append(label.item())
+                loss = criterion(logits, label)
+                running_loss += loss.item()
+
+                pred = logits.argmax(dim=1)
+                correct += pred.eq(label).sum().item()
+                total += 1
+
+                all_preds.append(pred.item())
+                all_labels.append(label.item())
 
     avg_loss = running_loss / total
     accuracy = 100.0 * correct / total
@@ -428,8 +451,9 @@ def parse_args() -> argparse.Namespace:
             "hybrid",
             "dual_stream",
             "multi_branch",
+            "mean_pool",
         ],
-        help="MIL model type: 'simple' | 'dtfd' | 'clam_sb' | 'hybrid' | 'dual_stream' | 'multi_branch'. Default: simple.",
+        help="MIL model type: 'simple' | 'dtfd' | 'clam_sb' | 'hybrid' | 'dual_stream' | 'multi_branch' | 'mean_pool'. Default: simple.",
     )
     parser.add_argument(
         "--data_root",
@@ -498,6 +522,13 @@ def parse_args() -> argparse.Namespace:
         default=15,
         help="Stop training after this many epochs without val QWK improvement (default: 15).",
     )
+    parser.add_argument(
+        "--formulation",
+        type=str,
+        default="classification",
+        choices=["classification", "regression"],
+        help="Formulation of the problem: 'classification' (4 classes) or 'regression' (scalar 0-3).",
+    )
 
     return parser.parse_args()
 
@@ -537,7 +568,7 @@ def main() -> None:
     features_dir = Path(args.data_root) / cfg["feature_dir"]
     input_dim = cfg["dim"]
     display_name = cfg["display_name"]
-    num_classes = 4
+    num_classes = 1 if args.formulation == "regression" else 4
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     log(f"Device: {device}", log_file)
@@ -633,6 +664,11 @@ def main() -> None:
             num_classes=num_classes,
             topk_focal=5,
         ).to(device)
+    elif args.model_type == "mean_pool":
+        model = MeanPoolMIL(
+            vision_dim=cfg["dim"],
+            num_classes=num_classes,
+        ).to(device)
     else:
         model = DTFDMIL(
             input_dim=input_dim,
@@ -649,21 +685,25 @@ def main() -> None:
     )
 
     # ── Optimiser & loss ──────────────────────────────────────────────
-    # Class weights: G0=4.0, G1=1.0, G2=1.0, G3=4.0
-    # G0 and G3 get higher weights to handle severe minority classes
-    class_weights = torch.tensor([4.0, 1.0, 1.0, 4.0], device=device)
+    if args.formulation == "regression":
+        criterion = nn.SmoothL1Loss()
+    else:
+        # Class weights: G0=1.0, G1=1.0, G2=1.0, G3=1.0
+        # G0 and G3 get higher weights to handle severe minority classes
+        class_weights = torch.tensor([1.0, 1.0, 1.0, 1.0], device=device)
+        criterion = nn.CrossEntropyLoss(weight=class_weights, label_smoothing=0.1)
 
-    criterion = nn.CrossEntropyLoss(weight=class_weights, label_smoothing=0.1)
     optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=0.01)
 
     scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=1e-6)
 
-    # Debug: verify active class weights
-    weights_str = "  ".join(
-        f"{n}={w:.1f}" for n, w in zip(CLASS_NAMES, class_weights.tolist())
-    )
     log(f"\nLoss: {criterion.__class__.__name__}", log_file)
-    log(f"Weights: {weights_str}", log_file)
+    log(f"Formulation: {args.formulation}", log_file)
+    if args.formulation == "classification":
+        weights_str = "  ".join(
+            f"{n}={w:.1f}" for n, w in zip(CLASS_NAMES, class_weights.tolist())
+        )
+        log(f"Weights: {weights_str}", log_file)
 
     # ── Training loop ─────────────────────────────────────────────────
     best_qwk = -1.0
@@ -713,6 +753,7 @@ def main() -> None:
             instance_weight=args.instance_weight,
             bag_weight=args.bag_weight,
             inst_weight=args.inst_weight,
+            formulation=args.formulation,
         )
 
         # Validate
@@ -730,6 +771,7 @@ def main() -> None:
             val_loader,
             criterion,
             device,
+            formulation=args.formulation,
         )
 
         # Per-epoch logging (2-line table)
@@ -810,6 +852,7 @@ def main() -> None:
             criterion,
             device,
             desc="  Test ",
+            formulation=args.formulation,
         )
 
         log(f"\n{test_cm_str}", log_file)

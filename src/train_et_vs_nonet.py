@@ -1,13 +1,13 @@
 """
-Training pipeline for binary MIL classification: PMF vs non-PMF (ET+PV).
+Training pipeline for binary MIL classification: ET vs non-ET (PV+PMF).
 
-Model A in the Soft Hierarchical Probabilistic Fusion approach.
+Model B in the Soft Hierarchical Probabilistic Fusion approach.
 Trains models on pre-extracted backbone features to classify
-Whole Slide Images into 2 classes: non-PMF (ET+PV) vs PMF.
+Whole Slide Images into 2 classes: non-ET (PV+PMF) vs ET.
 
 Usage:
-    python -m src.train_pmf_vs_nonpmf --backbone titan --model_type simple --epochs 50
-    python -m src.train_pmf_vs_nonpmf --backbone titan --model_type dtfd --num_pseudo_bags 8
+    python -m src.train_et_vs_nonet --backbone titan --model_type simple --epochs 50
+    python -m src.train_et_vs_nonet --backbone titan --model_type dtfd --num_pseudo_bags 8
 """
 
 import argparse
@@ -64,7 +64,7 @@ BACKBONE_CONFIG: Dict[str, Dict] = {
     },
 }
 
-CLASS_NAMES = ["non-PMF", "PMF"]
+CLASS_NAMES = ["non-ET", "ET"]
 
 # Suppress sklearn warning when y_pred contains classes absent from y_true
 warnings.filterwarnings("ignore", message="y_pred contains classes not in y_true")
@@ -156,10 +156,10 @@ def patient_split(
 
 # ── collate ──────────────────────────────────────────────────────────────
 def collate_bags_binary(batch):
-    """Custom collate: map PMF (2) -> 1, ET(0)/PV(1) -> 0."""
+    """Custom collate: map ET (0) -> 1, PV(1)/PMF(2) -> 0."""
     features_list = [item[0] for item in batch]
-    # Map PMF (2) -> 1, ET(0)/PV(1) -> 0
-    labels = torch.tensor([1 if item[1] == 2 else 0 for item in batch])
+    # Map ET (0) -> 1, PV(1)/PMF(2) -> 0
+    labels = torch.tensor([1 if item[1] == 0 else 0 for item in batch])
     slide_ids = [item[2] for item in batch]
     metrics_list = (
         [item[3] for item in batch] if len(batch[0]) > 3 else [{} for _ in batch]
@@ -413,7 +413,7 @@ def validate_and_evaluate(
 # ── argument parsing ─────────────────────────────────────────────────────
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Train binary MIL: PMF vs non-PMF (ET+PV)."
+        description="Train binary MIL: ET vs non-ET (PV+PMF)."
     )
     parser.add_argument(
         "--backbone",
@@ -513,16 +513,16 @@ def parse_args() -> argparse.Namespace:
         help="Label smoothing for CrossEntropyLoss (default: 0.0).",
     )
     parser.add_argument(
-        "--class_weight_nonpmf",
+        "--class_weight_nonet",
         type=float,
         default=1.0,
-        help="Class weight for non-PMF (default: 1.0). Only used with --use_class_weights.",
+        help="Class weight for non-ET (default: 1.0). Only used with --use_class_weights.",
     )
     parser.add_argument(
-        "--class_weight_pmf",
+        "--class_weight_et",
         type=float,
         default=1.0,
-        help="Class weight for PMF (default: 1.0). Only used with --use_class_weights.",
+        help="Class weight for ET (default: 1.0). Only used with --use_class_weights.",
     )
     parser.add_argument(
         "--use_class_weights",
@@ -548,7 +548,7 @@ def main() -> None:
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
     # Build unified run_name for directory, log, and checkpoint
-    run_name = f"pmf_vs_nonpmf_{args.model_type}_{args.backbone}"
+    run_name = f"et_vs_nonet_{args.model_type}_{args.backbone}"
     if args.model_type == "simple" and args.topk > 0:
         run_name += f"_topk{args.topk}"
     if args.model_type == "simple" and args.attention_bias:
@@ -602,7 +602,7 @@ def main() -> None:
         for idx in indices:
             pt_path, orig_label = full_dataset.samples[idx]
             patient_id = pt_path.parent.name
-            binary_label = 1 if orig_label == 2 else 0
+            binary_label = 1 if orig_label == 0 else 0
             stats[binary_label]["patients"].add(patient_id)
             stats[binary_label]["bags"] += 1
 
@@ -707,7 +707,7 @@ def main() -> None:
     # ── Optimiser & loss ──────────────────────────────────────────────
     if args.use_class_weights:
         class_weights = torch.tensor(
-            [args.class_weight_nonpmf, args.class_weight_pmf], device=device
+            [args.class_weight_nonet, args.class_weight_et], device=device
         )
     else:
         class_weights = None
@@ -742,7 +742,7 @@ def main() -> None:
     log(f"{'=' * 60}", log_file)
 
     # Table header
-    hdr = "Ep   | Mode  | Loss  | Acc   | F1    | M.Rcl | Recall ( non-PMF / PMF )"
+    hdr = "Ep   | Mode  | Loss  | Acc   | F1    | M.Rcl | Recall ( non-ET / ET )"
     sep = "-" * len(hdr)
 
     def fmt_recall(recall_list: List[float]) -> str:

@@ -46,6 +46,7 @@ from models.residual_metric_mil import ResidualMetricMIL
 from models.simple_mil import SimpleGatedMIL
 from models.dual_stream_mil import DualStreamMIL
 from models.multi_branch_mil import MultiBranchMIL
+from models.mean_pool_mil import MeanPoolMIL
 
 # ── backbone configuration ───────────────────────────────────────────────
 BACKBONE_CONFIG: Dict[str, Dict] = {
@@ -434,8 +435,9 @@ def parse_args() -> argparse.Namespace:
             "residual_metric",
             "dual_stream",
             "multi_branch",
+            "mean_pool",
         ],
-        help="MIL model type: 'simple' | 'dtfd' | 'clam_sb' | 'hybrid' | 'explicit' | 'residual_metric' | 'dual_stream' | 'multi_branch'. Default: simple.",
+        help="MIL model type: 'simple' | 'dtfd' | 'clam_sb' | 'hybrid' | 'explicit' | 'residual_metric' | 'dual_stream' | 'multi_branch' | 'mean_pool'. Default: simple.",
     )
     parser.add_argument(
         "--data_root",
@@ -657,6 +659,11 @@ def main() -> None:
     elif args.model_type == "residual_metric":
         model = ResidualMetricMIL(
             input_dim=input_dim,
+            num_classes=num_classes,
+        ).to(device)
+    elif args.model_type == "mean_pool":
+        model = MeanPoolMIL(
+            vision_dim=input_dim,
             num_classes=num_classes,
         ).to(device)
     else:
