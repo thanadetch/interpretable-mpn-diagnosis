@@ -17,10 +17,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from core.config import (
     RAW_DATA_DIR,
-    PROCESSED_SUBTYPE_DIR,
-    PROCESSED_SUBTYPE_CLEAN_DIR,
-    PROCESSED_GRADING_DIR,
-    PROCESSED_GRADING_CLEAN_DIR,
     CLASS_MAP,
     GRADE_MAP,
     IMAGE_EXTENSIONS,
@@ -312,6 +308,89 @@ def calculate_actual_split(features_dir: Path, seed: int = 42) -> tuple:
     return headers, rows
 
 
+def calculate_actual_grading_split(features_dir: Path, seed: int = 42) -> tuple:
+    """
+    Calculate the actual grading train/val/test split using the same logic
+    as train_grading_reti.py.
+
+    Returns:
+        (headers, rows) suitable for print_table.
+    """
+    from data.bag_dataset import GradingBagDatasetFull
+    from train_grading_reti import patient_split
+
+    LABEL_MAP = {0: "G0", 1: "G1", 2: "G2", 3: "G3"}
+
+    dataset = GradingBagDatasetFull(features_dir)
+    train_idx, val_idx, test_idx = patient_split(dataset, seed=seed)
+
+    # Collect stats per split per label
+    stats = {
+        split: {label: {"patients": set(), "images": 0} for label in LABEL_MAP}
+        for split in ["Train", "Val", "Test"]
+    }
+
+    for split_name, indices in [
+        ("Train", train_idx),
+        ("Val", val_idx),
+        ("Test", test_idx),
+    ]:
+        for idx in indices:
+            pt_path, label = dataset.samples[idx]
+            patient_id = pt_path.parent.name
+            stats[split_name][label]["patients"].add(patient_id)
+            stats[split_name][label]["images"] += 1
+
+    # Build pivot table
+    headers = [
+        "Grade",
+        "Train (Pat/Img)",
+        "Val (Pat/Img)",
+        "Test (Pat/Img)",
+        "Total (Pat/Img)",
+    ]
+    rows = []
+    totals = {"Train": [0, 0], "Val": [0, 0], "Test": [0, 0]}
+
+    for label in sorted(LABEL_MAP.keys()):
+        grade = LABEL_MAP[label]
+        cells = {}
+        total_pat, total_img = 0, 0
+        for split_name in ["Train", "Val", "Test"]:
+            pat = len(stats[split_name][label]["patients"])
+            img = stats[split_name][label]["images"]
+            cells[split_name] = f"{pat} ({img})"
+            totals[split_name][0] += pat
+            totals[split_name][1] += img
+            total_pat += pat
+            total_img += img
+
+        rows.append(
+            [
+                grade,
+                cells["Train"],
+                cells["Val"],
+                cells["Test"],
+                f"{total_pat} ({total_img})",
+            ]
+        )
+
+    # Grand total row
+    grand_pat = sum(v[0] for v in totals.values())
+    grand_img = sum(v[1] for v in totals.values())
+    rows.append(
+        [
+            "Total",
+            f"{totals['Train'][0]} ({totals['Train'][1]})",
+            f"{totals['Val'][0]} ({totals['Val'][1]})",
+            f"{totals['Test'][0]} ({totals['Test'][1]})",
+            f"{grand_pat} ({grand_img})",
+        ]
+    )
+
+    return headers, rows
+
+
 def main():
     """Main entry point for dataset statistics."""
     parser = argparse.ArgumentParser(description="MPN Dataset Statistics")
@@ -320,6 +399,12 @@ def main():
         type=str,
         default=None,
         help="Explicit path to the features directory for split calculation.",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="Random seed for train/val/test splitting (default: 42).",
     )
     args = parser.parse_args()
 
@@ -331,10 +416,8 @@ def main():
     # 1. Raw Data Analysis - H&E Images (Subtype Classification)
     # ==================================================================
     he_stats = count_raw_he_images(RAW_DATA_DIR)
-    subtype_patches = count_patches(PROCESSED_SUBTYPE_DIR)
-    subtype_patches_clean = count_patches(PROCESSED_SUBTYPE_CLEAN_DIR)
 
-    headers = ["Subtype", "Patients", "Raw Images", "Patches (Orig)", "Patches (Clean)"]
+    headers = ["Subtype", "Patients", "Raw Images"]
     rows = []
     for subtype in CLASS_MAP.keys():
         rows.append(
@@ -342,8 +425,6 @@ def main():
                 subtype,
                 he_stats.get(subtype, {}).get("patients", 0),
                 he_stats.get(subtype, {}).get("images", 0),
-                subtype_patches.get(subtype, 0),
-                subtype_patches_clean.get(subtype, 0),
             ]
         )
 
@@ -377,9 +458,9 @@ def main():
 
     if features_dir is not None:
         print(f"\n  ℹ️  Using '{features_dir}' as reference for split statistics.")
-        split_headers, split_rows = calculate_actual_split(features_dir, seed=42)
+        split_headers, split_rows = calculate_actual_split(features_dir, seed=args.seed)
         print_table(
-            f"ACTUAL Data Split (Sourced from train_mil.py, Seed=42, Ref: {features_dir.name})",
+            f"ACTUAL Data Split (Sourced from train_mil.py, Seed={args.seed}, Ref: {features_dir.name})",
             split_headers,
             split_rows,
         )
@@ -392,10 +473,8 @@ def main():
     # 2. Raw Data Analysis - Reticulin Images (Fibrosis Grading)
     # ==================================================================
     reti_stats = count_raw_reticulin_images(RAW_DATA_DIR)
-    grading_patches = count_grading_patches(PROCESSED_GRADING_DIR)
-    grading_patches_clean = count_grading_patches(PROCESSED_GRADING_CLEAN_DIR)
 
-    headers = ["Grade", "Patients", "Raw Images", "Patches (Orig)", "Patches (Clean)"]
+    headers = ["Grade", "Patients", "Raw Images"]
     rows = []
     for grade in GRADE_MAP.keys():
         rows.append(
@@ -403,12 +482,23 @@ def main():
                 grade,
                 reti_stats.get(grade, {}).get("patients", 0),
                 reti_stats.get(grade, {}).get("images", 0),
-                grading_patches.get(grade, 0),
-                grading_patches_clean.get(grade, 0),
             ]
         )
 
     print_table("Reticulin Fibrosis Grading (G0-G3)", headers, rows)
+
+    # ==================================================================
+    # 2b. Actual Train/Val/Test Split for Grading (from train_grading_reti.py)
+    # ==================================================================
+    if features_dir is not None:
+        grading_headers, grading_rows = calculate_actual_grading_split(
+            features_dir, seed=args.seed
+        )
+        print_table(
+            f"ACTUAL Grading Data Split (Sourced from train_grading_reti.py, Seed={args.seed}, Ref: {features_dir.name})",
+            grading_headers,
+            grading_rows,
+        )
 
     # ==================================================================
     # 3. Summary
@@ -427,13 +517,6 @@ def main():
     )
     print(
         f"  Reticulin (Grading): {total_reti_patients:>4} patients, {total_reti_images:>5} images"
-    )
-    print()
-    print(
-        f"  Subtype Patches:     {sum(subtype_patches.values()):>6} original, {sum(subtype_patches_clean.values()):>6} clean"
-    )
-    print(
-        f"  Grading Patches:     {sum(grading_patches.values()):>6} original, {sum(grading_patches_clean.values()):>6} clean"
     )
     print("=" * 70 + "\n")
 

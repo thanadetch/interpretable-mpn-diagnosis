@@ -3,20 +3,18 @@ Training pipeline for MIL Reticulin Fibrosis Grading (4-class).
 
 Supports:
     - SimpleGatedMIL: Lightweight gated-attention MIL (recommended for small datasets)
-    - DTFD-MIL: Double-Tier Feature Distillation (Zhang et al., CVPR 2022)
+    - HybridMIL, DualStreamMIL, MultiBranchMIL, MeanPoolMIL
 
 Trains models on pre-extracted reticulin backbone features to classify
 Whole Slide Images into 4 fibrosis grades: G0, G1, G2, G3.
 
 Usage:
     python -m src.train_grading_reti --backbone titan --model_type simple --epochs 50
-    python -m src.train_grading_reti --backbone titan --model_type dtfd --num_pseudo_bags 8
 """
 
 import argparse
 import random
 import json
-import warnings
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
@@ -40,8 +38,7 @@ from tqdm import tqdm
 
 from core.config import EXPERIMENTS_DIR, SEED
 from data.bag_dataset import GradingBagDatasetFull
-from models.clam import CLAM_SB
-from models.dtfd_mil import DTFDMIL, compute_dtfd_loss
+
 from models.hybrid_mil import HybridMIL
 from models.simple_mil import SimpleGatedMIL
 from models.dual_stream_mil import DualStreamMIL
@@ -71,9 +68,6 @@ BACKBONE_CONFIG: Dict[str, Dict] = {
         "display_name": "Virchow2",
     },
 }
-
-# Suppress sklearn warning when y_pred contains classes absent from y_true
-warnings.filterwarnings("ignore", message="y_pred contains classes not in y_true")
 
 
 # ── helpers ───────────────────────────────────────────────────────────────
@@ -183,13 +177,9 @@ def train_one_epoch(
     optimizer: torch.optim.Optimizer,
     device: torch.device,
     model_type: str = "simple",
-    tier1_weight: float = 0.5,
-    instance_weight: float = 0.2,
-    bag_weight: float = 0.7,
-    inst_weight: float = 0.3,
     formulation: str = "classification",
-) -> Tuple[float, float, float, List[float], float, float, dict]:
-    """Train for one epoch. Handles 'simple', 'dtfd', and 'clam_sb' model types."""
+) -> Tuple[float, float, float, List[float], float, float, float, dict]:
+    """Train for one epoch. Handles standard MIL model types."""
     model.train()
     running_loss = 0.0
     correct = 0
@@ -208,49 +198,22 @@ def train_one_epoch(
             features = features.to(device)  # [N, D]
             label = labels[i].item()
 
-            if model_type == "dtfd":
-                bag_logits, pseudo_bag_logits, instance_logits_list = (
-                    model.forward_training(features)
-                )
-                loss, loss_dict = compute_dtfd_loss(
-                    bag_logits=bag_logits,
-                    pseudo_bag_logits=pseudo_bag_logits,
-                    instance_logits_list=instance_logits_list,
-                    bag_label=label,
-                    criterion=criterion,
-                    tier1_weight=tier1_weight,
-                    instance_weight=instance_weight,
-                )
-                for key, value in loss_dict.items():
-                    loss_sums[key] += value
-            elif model_type == "clam_sb":
-                # CLAM-SB: bag loss + instance clustering loss
-                logits, inst_dict = model.forward_training(features, bag_label=label)
-                label_tensor = torch.tensor([label], device=device)
-                bag_loss = criterion(logits.unsqueeze(0), label_tensor)
-                inst_loss = inst_dict["inst_loss"]
-                loss = bag_weight * bag_loss + inst_weight * inst_loss
-                loss_sums["bag_loss"] += bag_loss.item()
-                loss_sums["inst_loss"] += inst_loss.item()
+            # Standard MIL models (simple, hybrid, dual_stream, multi_branch, mean_pool)
+            logits, _, _ = model(features)
+            if formulation == "regression":
+                label_tensor = torch.tensor([label], dtype=torch.float32, device=device)
+                loss = criterion(logits.view(-1), label_tensor)
             else:
-                # Standard MIL models (simple, hybrid, dual_stream, multi_branch)
-                logits, _, _ = model(features)
-                if formulation == "regression":
-                    label_tensor = torch.tensor(
-                        [label], dtype=torch.float32, device=device
-                    )
-                    loss = criterion(logits.view(-1), label_tensor)
-                else:
-                    label_tensor = torch.tensor([label], device=device)
-                    loss = criterion(logits.unsqueeze(0), label_tensor)
-                loss_sums["bag_loss"] += loss.item()
+                label_tensor = torch.tensor([label], device=device)
+                loss = criterion(logits.view(1, -1), label_tensor)
+            loss_sums["bag_loss"] += loss.item()
 
             batch_loss = batch_loss + loss
 
             if formulation == "regression":
                 pred = int(max(0, min(3, round(logits.view(-1).item()))))
             else:
-                pred = (bag_logits if model_type == "dtfd" else logits).argmax().item()
+                pred = logits.argmax().item()
             batch_correct += int(pred == label)
             all_preds.append(pred)
             all_labels.append(label)
@@ -273,7 +236,13 @@ def train_one_epoch(
 
     avg_loss = running_loss / total
     avg_acc = 100.0 * correct / total
-    train_f1 = f1_score(all_labels, all_preds, average="macro", zero_division=0)
+    train_f1 = f1_score(
+        all_labels,
+        all_preds,
+        labels=list(range(len(CLASS_NAMES))),
+        average="macro",
+        zero_division=0,
+    )
 
     # Per-class recall
     per_class_recall = recall_score(
@@ -284,9 +253,12 @@ def train_one_epoch(
         zero_division=0,
     )
     recall_list = [100.0 * r for r in per_class_recall]
+    train_macro_recall = sum(recall_list) / len(recall_list)
 
     # QWK (Quadratic Weighted Kappa) — primary metric
-    train_qwk = cohen_kappa_score(all_labels, all_preds, weights="quadratic")
+    train_qwk = cohen_kappa_score(
+        all_labels, all_preds, labels=list(range(len(CLASS_NAMES))), weights="quadratic"
+    )
 
     # MAE (Mean Absolute Error) — ordinal distance metric
     train_mae = mean_absolute_error(all_labels, all_preds)
@@ -297,6 +269,7 @@ def train_one_epoch(
         avg_acc,
         train_f1,
         recall_list,
+        train_macro_recall,
         train_qwk,
         train_mae,
         avg_components,
@@ -312,7 +285,7 @@ def validate_and_evaluate(
     device: torch.device,
     desc: str = "  Val  ",
     formulation: str = "classification",
-) -> Tuple[float, float, float, List[float], float, float, str, str]:
+) -> Tuple[float, float, float, List[float], float, float, float, str, str]:
     """
     Validate/Test a MIL model and return metric strings.
 
@@ -358,7 +331,7 @@ def validate_and_evaluate(
                 all_preds.append(pred_val)
                 all_labels.append(label.item())
             else:
-                logits = logits.unsqueeze(0)
+                logits = logits.view(1, -1)
 
                 loss = criterion(logits, label)
                 running_loss += loss.item()
@@ -374,7 +347,13 @@ def validate_and_evaluate(
     accuracy = 100.0 * correct / total
 
     # Compute imbalance-aware metrics
-    f1_macro = f1_score(all_labels, all_preds, average="macro", zero_division=0)
+    f1_macro = f1_score(
+        all_labels,
+        all_preds,
+        labels=list(range(len(CLASS_NAMES))),
+        average="macro",
+        zero_division=0,
+    )
 
     # Build confusion matrix string
     cm = confusion_matrix(all_labels, all_preds, labels=list(range(len(CLASS_NAMES))))
@@ -411,9 +390,12 @@ def validate_and_evaluate(
         zero_division=0,
     )
     recall_list = [100.0 * r for r in per_class_recall]
+    macro_recall = sum(recall_list) / len(recall_list)
 
     # QWK (Quadratic Weighted Kappa) — primary metric
-    qwk = cohen_kappa_score(all_labels, all_preds, weights="quadratic")
+    qwk = cohen_kappa_score(
+        all_labels, all_preds, labels=list(range(len(CLASS_NAMES))), weights="quadratic"
+    )
 
     # MAE (Mean Absolute Error) — ordinal distance metric
     mae = mean_absolute_error(all_labels, all_preds)
@@ -423,6 +405,7 @@ def validate_and_evaluate(
         accuracy,
         f1_macro,
         recall_list,
+        macro_recall,
         qwk,
         mae,
         cm_str,
@@ -446,14 +429,12 @@ def parse_args() -> argparse.Namespace:
         default="simple",
         choices=[
             "simple",
-            "dtfd",
-            "clam_sb",
             "hybrid",
             "dual_stream",
             "multi_branch",
             "mean_pool",
         ],
-        help="MIL model type: 'simple' | 'dtfd' | 'clam_sb' | 'hybrid' | 'dual_stream' | 'multi_branch' | 'mean_pool'. Default: simple.",
+        help="MIL model type: 'simple' | 'hybrid' | 'dual_stream' | 'multi_branch' | 'mean_pool'. Default: simple.",
     )
     parser.add_argument(
         "--data_root",
@@ -468,44 +449,11 @@ def parse_args() -> argparse.Namespace:
         "--num_workers", type=int, default=4, help="DataLoader workers."
     )
 
-    # DTFD-MIL specific arguments
-    parser.add_argument(
-        "--num_pseudo_bags",
-        type=int,
-        default=8,
-        help="Number of pseudo-bags for DTFD-MIL (default: 8).",
-    )
-    parser.add_argument(
-        "--tier1_weight",
-        type=float,
-        default=0.5,
-        help="Weight for pseudo-bag auxiliary loss (default: 0.5).",
-    )
-    parser.add_argument(
-        "--instance_weight",
-        type=float,
-        default=0.2,
-        help="Weight for instance-level loss (default: 0.2). Set to 0.0 to disable.",
-    )
     parser.add_argument(
         "--topk",
         type=int,
         default=0,
         help="Top-k pooling: use mean of k highest-attention patches. 0 = standard attention (default: 0).",
-    )
-
-    # CLAM-SB specific arguments
-    parser.add_argument(
-        "--bag_weight",
-        type=float,
-        default=0.7,
-        help="Weight for bag-level loss in CLAM-SB (default: 0.7).",
-    )
-    parser.add_argument(
-        "--inst_weight",
-        type=float,
-        default=0.3,
-        help="Weight for instance clustering loss in CLAM-SB (default: 0.3).",
     )
 
     # Experiment tracking
@@ -528,6 +476,13 @@ def parse_args() -> argparse.Namespace:
         default="classification",
         choices=["classification", "regression"],
         help="Formulation of the problem: 'classification' (4 classes) or 'regression' (scalar 0-3).",
+    )
+    parser.add_argument(
+        "--main_metric",
+        type=str,
+        default="qwk",
+        choices=["qwk", "f1", "acc", "macro_recall"],
+        help="Metric used to determine the best model for early stopping and saving.",
     )
 
     return parser.parse_args()
@@ -639,11 +594,6 @@ def main() -> None:
             num_classes=num_classes,
             topk=args.topk,
         ).to(device)
-    elif args.model_type == "clam_sb":
-        model = CLAM_SB(
-            input_dim=input_dim,
-            num_classes=num_classes,
-        ).to(device)
     elif args.model_type == "hybrid":
         k = args.topk if args.topk > 0 else 5
         model = HybridMIL(
@@ -670,11 +620,7 @@ def main() -> None:
             num_classes=num_classes,
         ).to(device)
     else:
-        model = DTFDMIL(
-            input_dim=input_dim,
-            num_classes=num_classes,
-            num_pseudo_bags=args.num_pseudo_bags,
-        ).to(device)
+        raise ValueError(f"Unknown model_type: {args.model_type}")
 
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -685,12 +631,12 @@ def main() -> None:
     )
 
     # ── Optimiser & loss ──────────────────────────────────────────────
+    # Class weights: G0=1.0, G1=1.0, G2=1.0, G3=1.0
+    # G0 and G3 get higher weights to handle severe minority classes
+    class_weights = torch.tensor([1.0, 1.0, 1.0, 1.0], device=device)
     if args.formulation == "regression":
         criterion = nn.SmoothL1Loss()
     else:
-        # Class weights: G0=1.0, G1=1.0, G2=1.0, G3=1.0
-        # G0 and G3 get higher weights to handle severe minority classes
-        class_weights = torch.tensor([1.0, 1.0, 1.0, 1.0], device=device)
         criterion = nn.CrossEntropyLoss(weight=class_weights, label_smoothing=0.1)
 
     optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=0.01)
@@ -706,7 +652,7 @@ def main() -> None:
         log(f"Weights: {weights_str}", log_file)
 
     # ── Training loop ─────────────────────────────────────────────────
-    best_qwk = -1.0
+    best_metric_val = -float("inf")
     best_epoch = 0
     epochs_without_improvement = 0
 
@@ -715,7 +661,7 @@ def main() -> None:
     log(f"{'=' * 60}", log_file)
 
     # Table header
-    hdr = "Ep   | Mode  | Loss  | Acc   | F1    | MAE   | QWK   | Recall ( G0 / G1 / G2 / G3 )"
+    hdr = "Ep   | Mode  | Loss  | Acc   | F1    | MacRec| MAE   | QWK   | Recall ( G0 / G1 / G2 / G3 )"
     sep = "-" * len(hdr)
 
     def fmt_recall(recall_list: List[float]) -> str:
@@ -739,6 +685,7 @@ def main() -> None:
             train_acc,
             train_f1,
             train_recall,
+            train_macro_recall,
             train_qwk,
             train_mae,
             loss_components,
@@ -749,10 +696,6 @@ def main() -> None:
             optimizer,
             device,
             model_type=args.model_type,
-            tier1_weight=args.tier1_weight,
-            instance_weight=args.instance_weight,
-            bag_weight=args.bag_weight,
-            inst_weight=args.inst_weight,
             formulation=args.formulation,
         )
 
@@ -762,6 +705,7 @@ def main() -> None:
             val_acc,
             val_f1,
             val_recall,
+            val_macro_recall,
             val_qwk,
             val_mae,
             val_cm_str,
@@ -778,27 +722,36 @@ def main() -> None:
         ep_str = f"{epoch}/{args.epochs}"
         log(
             f"{ep_str:<5}| Train | {train_loss:<5.3f} | {train_acc:<5.1f} "
-            f"| {train_f1:<5.3f} | {train_mae:<5.3f} | {train_qwk:<5.3f} | {fmt_recall(train_recall)}",
+            f"| {train_f1:<5.3f} | {train_macro_recall:<5.1f} | {train_mae:<5.3f} | {train_qwk:<5.3f} | {fmt_recall(train_recall)}",
             log_file,
         )
         log(
             f"     | Val   | {val_loss:<5.3f} | {val_acc:<5.1f} "
-            f"| {val_f1:<5.3f} | {val_mae:<5.3f} | {val_qwk:<5.3f} | {fmt_recall(val_recall)}",
+            f"| {val_f1:<5.3f} | {val_macro_recall:<5.1f} | {val_mae:<5.3f} | {val_qwk:<5.3f} | {fmt_recall(val_recall)}",
             log_file,
         )
         log(sep, log_file)
 
         scheduler.step()
 
-        # Save best model (based on val QWK)
-        if val_qwk > best_qwk:
-            best_qwk = val_qwk
+        # Save best model (based on selected main metric)
+        metrics_dict = {
+            "qwk": val_qwk,
+            "f1": val_f1,
+            "acc": val_acc,
+            "macro_recall": val_macro_recall,
+        }
+        current_metric = metrics_dict[args.main_metric]
+
+        if current_metric > best_metric_val:
+            best_metric_val = current_metric
             best_epoch = epoch
             epochs_without_improvement = 0
             checkpoint = {
                 "epoch": epoch,
                 "model_state_dict": model.state_dict(),
                 "optimizer_state_dict": optimizer.state_dict(),
+                "val_main_metric": current_metric,
                 "val_qwk": val_qwk,
                 "val_acc": val_acc,
                 "val_loss": val_loss,
@@ -811,7 +764,7 @@ def main() -> None:
             }
             torch.save(checkpoint, exp_dir / checkpoint_name)
             log(
-                f"     >>> ⭐ New Best Model! Val QWK: {val_qwk:.3f} | Acc: {val_acc:.1f}%",
+                f"     >>> ⭐ New Best Model! Val {args.main_metric.upper()}: {current_metric:.3f} | Acc: {val_acc:.1f}%",
                 log_file,
             )
             log(f"\n{val_cm_str}", log_file)
@@ -821,7 +774,7 @@ def main() -> None:
             if epochs_without_improvement >= args.early_stop_patience:
                 log(
                     f"\nEarly stopping triggered at epoch {epoch} "
-                    f"(no val QWK improvement for {args.early_stop_patience} epochs)",
+                    f"(no val {args.main_metric} improvement for {args.early_stop_patience} epochs)",
                     log_file,
                 )
                 break
@@ -842,6 +795,7 @@ def main() -> None:
             test_acc,
             test_f1,
             test_recall,
+            test_macro_recall,
             test_qwk,
             test_mae,
             test_cm_str,
@@ -860,11 +814,12 @@ def main() -> None:
 
         log(f"\nFINAL RESULTS:", log_file)
         log(
-            f"  Best Val QWK:          {best_qwk:.3f} (Epoch {best_epoch})",
+            f"  Best Val {args.main_metric.upper()}:{' ' * max(1, 13 - len(args.main_metric))}{best_metric_val:.3f} (Epoch {best_epoch})",
             log_file,
         )
         log(f"  Test Accuracy:         {test_acc:.2f}%", log_file)
         log(f"  Test F1 (Macro):       {test_f1:.3f}", log_file)
+        log(f"  Test Macro Recall:     {test_macro_recall:.2f}%", log_file)
         log(f"  Test QWK:              {test_qwk:.3f}", log_file)
         log(f"  Test MAE:              {test_mae:.3f}", log_file)
         log(f"  Test Loss:             {test_loss:.4f}", log_file)
