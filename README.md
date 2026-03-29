@@ -102,6 +102,11 @@
     --task et_vs_pv \
     --split test`
 
+`python -m src.tools.visualize_heatmap_set \
+    --mil_checkpoint experiments/et_vs_pv_mean_pool_titan_20260326_091710/best_et_vs_pv_mean_pool_titan.pth \
+    --split test \
+    --task et_vs_pv`
+
 
 `python src/tools/analyze_shortcuts.py \
         --mil_checkpoint experiments/simple_virchow2_bias_20260304_104414/best_simple_virchow2_bias.pth \

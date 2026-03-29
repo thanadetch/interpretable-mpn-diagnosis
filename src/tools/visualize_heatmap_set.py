@@ -49,6 +49,7 @@ from models.simple_mil import SimpleGatedMIL
 from models.dtfd_mil import DTFDMIL
 from models.dual_stream_mil import DualStreamMIL
 from models.multi_branch_mil import MultiBranchMIL
+from models.mean_pool_mil import MeanPoolMIL
 
 CLASS_NAMES = [CLASS_MAP_INV[i] for i in range(len(CLASS_MAP))]
 
@@ -374,10 +375,17 @@ def load_mil_model(
             num_classes=num_classes,
             topk_focal=args.get("topk_focal", 5),
         )
+    elif model_type == "mean_pool":
+        dropout = args.get("dropout", 0.5)
+        model = MeanPoolMIL(
+            vision_dim=input_dim,
+            num_classes=num_classes,
+            dropout=dropout,
+        )
     else:
         raise ValueError(
             f"Heatmap visualization supports 'simple', 'hybrid', 'dtfd', 'dual_stream', "
-            f"and 'multi_branch' MIL models, got '{model_type}'."
+            f"'multi_branch', and 'mean_pool' MIL models, got '{model_type}'."
         )
 
     model.load_state_dict(checkpoint["model_state_dict"])
@@ -398,7 +406,7 @@ def compute_mil_attention(
     mil_model: nn.Module,
     device: torch.device,
     ckpt_args: Optional[dict] = None,
-) -> Tuple[np.ndarray, int, np.ndarray]:
+) -> Tuple[Optional[np.ndarray], int, np.ndarray]:
     """
     Compute MIL attention scores for all patches in a bag.
 
@@ -409,7 +417,7 @@ def compute_mil_attention(
         ckpt_args: Checkpoint args dict (to check attention_bias flag).
 
     Returns:
-        attention: MIL attention weights [N], normalized to [0, 1].
+        attention: MIL attention weights [N], normalized to [0, 1], or None for MeanPoolMIL.
         pred_class: Predicted class index.
         probs: Class probabilities [C].
     """
@@ -425,20 +433,26 @@ def compute_mil_attention(
         features = data.to(device)
         metrics = {}
 
-    # Only pass metrics if the model was trained with --attention_bias
-    use_bias = (ckpt_args or {}).get("attention_bias", False)
-    if isinstance(mil_model, SimpleGatedMIL):
-        logits, attention, _ = mil_model(
-            features, return_attention=True, metrics=metrics if use_bias else None
-        )
+    # MeanPoolMIL has no attention mechanism
+    if isinstance(mil_model, MeanPoolMIL):
+        outputs = mil_model(features)
+        logits = outputs[0] if isinstance(outputs, tuple) else outputs
+        attention = None
     else:
-        logits, attention, _ = mil_model(features, return_attention=True)
+        # Only pass metrics if the model was trained with --attention_bias
+        use_bias = (ckpt_args or {}).get("attention_bias", False)
+        if isinstance(mil_model, SimpleGatedMIL):
+            logits, attention, _ = mil_model(
+                features, return_attention=True, metrics=metrics if use_bias else None
+            )
+        else:
+            logits, attention, _ = mil_model(features, return_attention=True)
+
+        # Attention is already softmax-normalized by the MIL model
+        attention = attention.cpu().numpy()
 
     probs = F.softmax(logits, dim=0).cpu().numpy()
     pred_class = logits.argmax().item()
-
-    # Attention is already softmax-normalized by the MIL model
-    attention = attention.cpu().numpy()
 
     return attention, pred_class, probs
 
@@ -567,19 +581,24 @@ def generate_grid_gallery(
 
     # ── 3. Sort patches by MIL attention (descending) ───────────────
     scored_patches = []
-    for idx, (path, row, col) in enumerate(patches):
-        score = mil_attention[idx] if idx < len(mil_attention) else 0.0
-        scored_patches.append((path, row, col, score))
+    if mil_attention is not None:
+        for idx, (path, row, col) in enumerate(patches):
+            score = mil_attention[idx] if idx < len(mil_attention) else 0.0
+            scored_patches.append((path, row, col, score))
 
-    scored_patches.sort(key=lambda x: x[3], reverse=True)
+        scored_patches.sort(key=lambda x: x[3], reverse=True)
 
-    # Normalize MIL scores to [0, 1] for dynamic alpha
-    all_scores = np.array([s[3] for s in scored_patches])
-    s_min, s_max = all_scores.min(), all_scores.max()
-    if s_max - s_min > 1e-8:
-        scores_normalized = (all_scores - s_min) / (s_max - s_min)
+        all_scores = np.array([s[3] for s in scored_patches])
+        s_min, s_max = all_scores.min(), all_scores.max()
+        if s_max - s_min > 1e-8:
+            scores_normalized = (all_scores - s_min) / (s_max - s_min)
+        else:
+            scores_normalized = np.ones_like(all_scores)
     else:
-        scores_normalized = np.ones_like(all_scores)
+        # Mean Pooling: Keep spatial order, no MIL scores
+        for path, row, col in patches:
+            scored_patches.append((path, row, col, None))
+        scores_normalized = np.ones(len(patches))
 
     # ── 4. Create Matplotlib grid ───────────────────────────────────
     n_rows = math.ceil(num_patches / n_cols)
@@ -626,11 +645,12 @@ def generate_grid_gallery(
         )
 
         ax.imshow(overlay)
-        ax.set_title(
-            f"Rank {rank + 1} | r{row}c{col}\nMIL: {score:.4f}",
-            fontsize=8,
-            pad=3,
-        )
+        if score is not None:
+            title_str = f"Rank {rank + 1} | r{row}c{col}\nMIL: {score:.4f}"
+        else:
+            title_str = f"r{row}c{col}"
+
+        ax.set_title(title_str, fontsize=8, pad=3)
         ax.axis("off")
 
     # ── 6. Turn off unused subplots ─────────────────────────────────
@@ -802,9 +822,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--task",
         type=str,
-        choices=["et_vs_pv", "pmf_vs_nonpmf", "multi"],
+        choices=["et_vs_pv", "pmf_vs_nonpmf", "et_vs_nonet", "multi"],
         default="et_vs_pv",
-        help="Task type to determine class mapping and num_classes (default: et_vs_pv).",
+        help="Task type: et_vs_pv, pmf_vs_nonpmf, et_vs_nonet, or multi (default: et_vs_pv).",
     )
 
     if torch.cuda.is_available():
@@ -838,6 +858,9 @@ def main() -> None:
         num_classes = 2
     elif args.task == "pmf_vs_nonpmf":
         class_names = ["non-PMF", "PMF"]
+        num_classes = 2
+    elif args.task == "et_vs_nonet":
+        class_names = ["non-ET", "ET"]
         num_classes = 2
     else:
         class_names = [CLASS_MAP_INV[i] for i in range(len(CLASS_MAP))]
