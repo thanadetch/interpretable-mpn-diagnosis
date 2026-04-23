@@ -44,6 +44,9 @@ from models.simple_mil import SimpleGatedMIL
 from models.dual_stream_mil import DualStreamMIL
 from models.multi_branch_mil import MultiBranchMIL
 from models.mean_pool_mil import MeanPoolMIL
+from models.dist_pool_mil import DistPoolMIL
+from models.mean_std_pool_mil import MeanStdPoolMIL
+from models.mean_topk_pool_mil import MeanTopKPoolMIL
 
 # ── backbone configuration ───────────────────────────────────────────────
 BACKBONE_CONFIG: Dict[str, Dict] = {
@@ -128,7 +131,7 @@ def patient_split(
     # Assuming CLASS_MAP is 0: ET (12 total), 1: PV (9 total), 2: PMF (21 total)
     split_targets = {
         0: (2, 2),  # ET  -> Train 8, Val 2, Test 2
-        1: (2, 2),  # PV  -> Train 5, Val 2, Test 2
+        1: (1, 1),  # PV  -> Train 7, Val 1, Test 1
         2: (3, 3),  # PMF -> Train 15, Val 3, Test 3
     }
 
@@ -164,7 +167,8 @@ def collate_bags_binary(batch):
     metrics_list = (
         [item[3] for item in batch] if len(batch[0]) > 3 else [{} for _ in batch]
     )
-    return features_list, labels, slide_ids, metrics_list
+    orig_labels = torch.tensor([item[1] for item in batch])
+    return features_list, labels, slide_ids, metrics_list, orig_labels
 
 
 # ── training ─────────────────────────────────────────────────────────────
@@ -191,7 +195,7 @@ def train_one_epoch(
     all_labels = []
 
     pbar = tqdm(loader, desc="  Train", leave=False)
-    for features_list, labels, slide_ids, metrics_list in pbar:
+    for features_list, labels, slide_ids, metrics_list, _ in pbar:
         labels = labels.to(device)
         batch_loss = torch.tensor(0.0, device=device, requires_grad=True)
         batch_correct = 0
@@ -301,7 +305,7 @@ def validate_and_evaluate(
     device: torch.device,
     desc: str = "  Val  ",
     attention_bias: bool = False,
-) -> Tuple[float, float, float, List[float], float, str, str]:
+) -> Tuple[float, float, float, List[float], float, str, str, str]:
     """
     Validate/Test a MIL model and return metric strings.
 
@@ -320,8 +324,9 @@ def validate_and_evaluate(
     total = 0
     all_preds = []
     all_labels = []
+    all_orig_labels = []
 
-    for features_list, labels, slide_ids, metrics_list in tqdm(
+    for features_list, labels, slide_ids, metrics_list, orig_labels in tqdm(
         loader, desc=desc, leave=False
     ):
         labels = labels.to(device)
@@ -356,6 +361,7 @@ def validate_and_evaluate(
 
             all_preds.append(pred.item())
             all_labels.append(label.item())
+            all_orig_labels.append(orig_labels[i].item())
 
     avg_loss = running_loss / total
     accuracy = 100.0 * correct / total
@@ -399,6 +405,25 @@ def validate_and_evaluate(
     recall_list = [100.0 * r for r in per_class_recall]
     macro_recall = recall_score(all_labels, all_preds, average="macro", zero_division=0)
 
+    # --- Compute Breakdown for non-PMF ---
+    # orig_labels: 0 = ET, 1 = PV, 2 = PMF
+    # pred: 0 = non-PMF, 1 = PMF
+    et_total = sum(1 for o in all_orig_labels if o == 0)
+    pv_total = sum(1 for o in all_orig_labels if o == 1)
+
+    et_correct = sum(1 for o, p in zip(all_orig_labels, all_preds) if o == 0 and p == 0)
+    et_wrong = sum(1 for o, p in zip(all_orig_labels, all_preds) if o == 0 and p == 1)
+
+    pv_correct = sum(1 for o, p in zip(all_orig_labels, all_preds) if o == 1 and p == 0)
+    pv_wrong = sum(1 for o, p in zip(all_orig_labels, all_preds) if o == 1 and p == 1)
+
+    breakdown_lines = [
+        "  non-PMF Class Breakdown (ET vs PV):",
+        f"      ET (Total: {et_total:2d}) -> Predicted non-PMF (Correct): {et_correct:2d} | Predicted PMF (Wrong): {et_wrong:2d}",
+        f"      PV (Total: {pv_total:2d}) -> Predicted non-PMF (Correct): {pv_correct:2d} | Predicted PMF (Wrong): {pv_wrong:2d}"
+    ]
+    breakdown_str = "\n".join(breakdown_lines)
+
     return (
         avg_loss,
         accuracy,
@@ -407,6 +432,7 @@ def validate_and_evaluate(
         macro_recall,
         cm_str,
         report_str,
+        breakdown_str,
     )
 
 
@@ -434,6 +460,9 @@ def parse_args() -> argparse.Namespace:
             "dual_stream",
             "multi_branch",
             "mean_pool",
+            "dist_pool",
+            "mean_std_pool",
+            "mean_topk_pool",
         ],
         help="MIL model type. Default: simple.",
     )
@@ -689,6 +718,23 @@ def main() -> None:
             vision_dim=input_dim,
             num_classes=num_classes,
         ).to(device)
+    elif args.model_type == "dist_pool":
+        model = DistPoolMIL(
+            vision_dim=input_dim,
+            num_classes=num_classes,
+        ).to(device)
+    elif args.model_type == "mean_std_pool":
+        model = MeanStdPoolMIL(
+            vision_dim=input_dim,
+            num_classes=num_classes,
+        ).to(device)
+    elif args.model_type == "mean_topk_pool":
+        k_val = args.topk if hasattr(args, 'topk') and args.topk > 0 else 5
+        model = MeanTopKPoolMIL(
+            vision_dim=input_dim,
+            num_classes=num_classes,
+            topk=k_val,
+        ).to(device)
     else:
         model = DTFDMIL(
             input_dim=input_dim,
@@ -791,6 +837,7 @@ def main() -> None:
             val_macro_recall,
             val_cm_str,
             val_report_str,
+            val_breakdown_str,
         ) = validate_and_evaluate(
             model,
             val_loader,
@@ -840,6 +887,7 @@ def main() -> None:
                 log_file,
             )
             log(f"\n{val_cm_str}", log_file)
+            log(f"\n{val_breakdown_str}", log_file)
             log(f"\n{val_report_str}", log_file)
         else:
             epochs_without_improvement += 1
@@ -870,6 +918,7 @@ def main() -> None:
             test_macro_recall,
             test_cm_str,
             test_report_str,
+            test_breakdown_str,
         ) = validate_and_evaluate(
             model,
             test_loader,
@@ -880,6 +929,7 @@ def main() -> None:
         )
 
         log(f"\n{test_cm_str}", log_file)
+        log(f"\n{test_breakdown_str}", log_file)
         log(f"\n{test_report_str}", log_file)
 
         log(f"\nFINAL RESULTS:", log_file)

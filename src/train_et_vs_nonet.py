@@ -44,6 +44,7 @@ from models.simple_mil import SimpleGatedMIL
 from models.dual_stream_mil import DualStreamMIL
 from models.multi_branch_mil import MultiBranchMIL
 from models.mean_pool_mil import MeanPoolMIL
+from models.mean_topk_pool_mil import MeanTopKPoolMIL
 
 # ── backbone configuration ───────────────────────────────────────────────
 BACKBONE_CONFIG: Dict[str, Dict] = {
@@ -128,7 +129,7 @@ def patient_split(
     # Assuming CLASS_MAP is 0: ET (12 total), 1: PV (9 total), 2: PMF (21 total)
     split_targets = {
         0: (2, 2),  # ET  -> Train 8, Val 2, Test 2
-        1: (2, 2),  # PV  -> Train 5, Val 2, Test 2
+        1: (1, 1),  # PV  -> Train 7, Val 1, Test 1
         2: (3, 3),  # PMF -> Train 15, Val 3, Test 3
     }
 
@@ -434,6 +435,7 @@ def parse_args() -> argparse.Namespace:
             "dual_stream",
             "multi_branch",
             "mean_pool",
+            "mean_topk_pool",
         ],
         help="MIL model type. Default: simple.",
     )
@@ -688,6 +690,13 @@ def main() -> None:
         model = MeanPoolMIL(
             vision_dim=input_dim,
             num_classes=num_classes,
+        ).to(device)
+    elif args.model_type == "mean_topk_pool":
+        k_val = args.topk if hasattr(args, 'topk') and args.topk > 0 else 5
+        model = MeanTopKPoolMIL(
+            vision_dim=input_dim,
+            num_classes=num_classes,
+            topk=k_val,
         ).to(device)
     else:
         model = DTFDMIL(

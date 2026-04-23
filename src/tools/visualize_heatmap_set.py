@@ -50,9 +50,11 @@ from models.dtfd_mil import DTFDMIL
 from models.dual_stream_mil import DualStreamMIL
 from models.multi_branch_mil import MultiBranchMIL
 from models.mean_pool_mil import MeanPoolMIL
+from models.dist_pool_mil import DistPoolMIL
+from models.mean_std_pool_mil import MeanStdPoolMIL
+from models.mean_topk_pool_mil import MeanTopKPoolMIL
 
 CLASS_NAMES = [CLASS_MAP_INV[i] for i in range(len(CLASS_MAP))]
-
 
 # =============================================================================
 # Constants
@@ -99,7 +101,7 @@ def parse_patch_filename(filename: str) -> Tuple[str, int, int]:
 
 
 def group_patches_by_image(
-    patient_dir: Path,
+        patient_dir: Path,
 ) -> Dict[str, list]:
     """
     Group all patches in a patient directory by source image ID.
@@ -171,8 +173,8 @@ def _find_last_attn_module_timm(model: nn.Module):
 
 
 def load_backbone(
-    backbone_name: str,
-    device: torch.device,
+        backbone_name: str,
+        device: torch.device,
 ) -> Tuple[nn.Module, Callable, Callable]:
     """
     Load a ViT backbone and return (model, transform, attention_extractor).
@@ -319,9 +321,9 @@ def load_backbone(
 
 
 def load_mil_model(
-    checkpoint_path: Path,
-    device: torch.device,
-    num_classes: int = 3,
+        checkpoint_path: Path,
+        device: torch.device,
+        num_classes: int = 3,
 ) -> Tuple[nn.Module, str, str]:
     """
     Load a trained MIL model from checkpoint.
@@ -382,10 +384,26 @@ def load_mil_model(
             num_classes=num_classes,
             dropout=dropout,
         )
+    elif model_type == "dist_pool":
+        model = DistPoolMIL(
+            vision_dim=input_dim,
+            num_classes=num_classes,
+        )
+    elif model_type == "mean_std_pool":
+        model = MeanStdPoolMIL(
+            vision_dim=input_dim,
+            num_classes=num_classes,
+        )
+    elif model_type == "mean_topk_pool":
+        model = MeanTopKPoolMIL(
+            vision_dim=input_dim,
+            num_classes=num_classes,
+        )
     else:
         raise ValueError(
             f"Heatmap visualization supports 'simple', 'hybrid', 'dtfd', 'dual_stream', "
-            f"'multi_branch', and 'mean_pool' MIL models, got '{model_type}'."
+            f"'multi_branch', 'mean_pool', 'dist_pool', 'mean_std_pool', and "
+            f"'mean_topk_pool' MIL models, got '{model_type}'."
         )
 
     model.load_state_dict(checkpoint["model_state_dict"])
@@ -402,10 +420,10 @@ def load_mil_model(
 
 @torch.inference_mode()
 def compute_mil_attention(
-    features_path: Path,
-    mil_model: nn.Module,
-    device: torch.device,
-    ckpt_args: Optional[dict] = None,
+        features_path: Path,
+        mil_model: nn.Module,
+        device: torch.device,
+        ckpt_args: Optional[dict] = None,
 ) -> Tuple[Optional[np.ndarray], int, np.ndarray]:
     """
     Compute MIL attention scores for all patches in a bag.
@@ -433,8 +451,8 @@ def compute_mil_attention(
         features = data.to(device)
         metrics = {}
 
-    # MeanPoolMIL has no attention mechanism
-    if isinstance(mil_model, MeanPoolMIL):
+    # These pooling models have no spatial attention mechanism
+    if isinstance(mil_model, (MeanPoolMIL, DistPoolMIL, MeanStdPoolMIL, MeanTopKPoolMIL)):
         outputs = mil_model(features)
         logits = outputs[0] if isinstance(outputs, tuple) else outputs
         attention = None
@@ -463,12 +481,12 @@ def compute_mil_attention(
 
 
 def create_patch_overlay(
-    patch_path: Path,
-    mil_score_normalized: float,
-    get_vit_attention: Callable,
-    backbone_transform: Callable,
-    device: torch.device,
-    patch_size: int = 224,
+        patch_path: Path,
+        mil_score_normalized: float,
+        get_vit_attention: Callable,
+        backbone_transform: Callable,
+        device: torch.device,
+        patch_size: int = 224,
 ) -> np.ndarray:
     """
     Create a ViT attention overlay on a single patch with dynamic alpha.
@@ -508,7 +526,7 @@ def create_patch_overlay(
         attn_norm = np.zeros_like(attn_smooth)
 
     # Gamma correction: tighten heatmap focus
-    attn_norm = attn_norm**0.8
+    attn_norm = attn_norm ** 0.8
 
     # Apply COLORMAP_TURBO
     attn_uint8 = (attn_norm * 255).astype(np.uint8)
@@ -521,27 +539,27 @@ def create_patch_overlay(
     alpha_3ch = alpha[..., np.newaxis]  # [H, W, 1]
 
     overlay = (
-        (1.0 - alpha_3ch) * raw_patch.astype(np.float64)
-        + alpha_3ch * heatmap_rgb.astype(np.float64)
+            (1.0 - alpha_3ch) * raw_patch.astype(np.float64)
+            + alpha_3ch * heatmap_rgb.astype(np.float64)
     ).astype(np.uint8)
 
     return overlay
 
 
 def generate_grid_gallery(
-    patient_dir: Path,
-    image_id: str,
-    mil_model: nn.Module,
-    get_vit_attention: Callable,
-    backbone_transform: Callable,
-    features_path: Path,
-    class_name: str,
-    save_path: Path,
-    class_names: List[str],
-    patch_size: int = 224,
-    n_cols: int = 8,
-    device: torch.device = torch.device("cpu"),
-    ckpt_args: Optional[dict] = None,
+        patient_dir: Path,
+        image_id: str,
+        mil_model: nn.Module,
+        get_vit_attention: Callable,
+        backbone_transform: Callable,
+        features_path: Path,
+        class_name: str,
+        save_path: Path,
+        class_names: List[str],
+        patch_size: int = 224,
+        n_cols: int = 8,
+        device: torch.device = torch.device("cpu"),
+        ckpt_args: Optional[dict] = None,
 ) -> None:
     """
     Generate a single grid gallery image with all patches sorted by MIL attention.
@@ -629,7 +647,7 @@ def generate_grid_gallery(
 
     # ── 5. Process each patch ───────────────────────────────────────
     for rank, (path, row, col, score) in enumerate(
-        tqdm(scored_patches, desc=f"    Grid (Image {image_id})", leave=False)
+            tqdm(scored_patches, desc=f"    Grid (Image {image_id})", leave=False)
     ):
         r_idx = rank // n_cols
         c_idx = rank % n_cols
@@ -674,8 +692,8 @@ def generate_grid_gallery(
 
 
 def load_checkpoint_metadata(
-    checkpoint_path: Path,
-    device: torch.device,
+        checkpoint_path: Path,
+        device: torch.device,
 ) -> Tuple[dict, str, str, dict]:
     """
     Load checkpoint and extract metadata.
@@ -688,11 +706,11 @@ def load_checkpoint_metadata(
 
 
 def get_target_patients(
-    dataset: MPNBagDatasetFull,
-    checkpoint: dict,
-    ckpt_args: dict,
-    split: str,
-    seed_arg: Any,
+        dataset: MPNBagDatasetFull,
+        checkpoint: dict,
+        ckpt_args: dict,
+        split: str,
+        seed_arg: Any,
 ) -> Dict[str, Dict]:
     """
     Map targeted split indices to unique patients with their metadata.

@@ -42,6 +42,9 @@ from models.residual_metric_mil import ResidualMetricMIL
 from models.simple_mil import SimpleGatedMIL
 from models.dual_stream_mil import DualStreamMIL
 from models.mean_pool_mil import MeanPoolMIL
+from models.dist_pool_mil import DistPoolMIL
+from models.mean_std_pool_mil import MeanStdPoolMIL
+from models.mean_topk_pool_mil import MeanTopKPoolMIL
 from models.multi_branch_mil import MultiBranchMIL
 
 # ── backbone configuration ───────────────────────────────────────────────
@@ -110,8 +113,19 @@ def build_model_from_ckpt(ckpt: dict, input_dim: int, device: torch.device) -> n
         model = MultiBranchMIL(input_dim=input_dim, num_classes=num_classes, topk_focal=ckpt_args.get("topk", 5))
     elif model_type == "mean_pool":
         model = MeanPoolMIL(vision_dim=input_dim, num_classes=num_classes)
+    elif model_type == "dist_pool":
+        model = DistPoolMIL(vision_dim=input_dim, num_classes=num_classes)
+    elif model_type == "mean_std_pool":
+        model = MeanStdPoolMIL(vision_dim=input_dim, num_classes=num_classes)
+    elif model_type == "mean_topk_pool":
+        model = MeanTopKPoolMIL(vision_dim=input_dim, num_classes=num_classes)
     else:
-        raise ValueError(f"Unknown model_type: {model_type}")
+        raise ValueError(
+            f"Unknown model_type: '{model_type}'. Supported types: "
+            f"'simple', 'clam_sb', 'explicit', 'hybrid', 'residual_metric', "
+            f"'dtfd', 'dual_stream', 'multi_branch', 'mean_pool', "
+            f"'dist_pool', 'mean_std_pool', 'mean_topk_pool'."
+        )
 
     model.load_state_dict(ckpt["model_state_dict"])
     model.to(device)

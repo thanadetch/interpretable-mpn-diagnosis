@@ -134,9 +134,24 @@
   --ckpt_stage2 experiments/et_vs_pv_mean_pool_titan_20260326_091710/best_et_vs_pv_mean_pool_titan.pth \
   --save_csv`
 
+ `python src/eval_hierarchical_fusion.py \
+  --data_root data \
+  --ckpt_stage1 experiments/pmf_vs_nonpmf_mean_topk_pool_virchow2_20260330_170130/best_pmf_vs_nonpmf_mean_topk_pool_virchow2.pth \
+  --ckpt_stage2 experiments/et_vs_pv_mean_pool_titan_20260330_170246/best_et_vs_pv_mean_pool_titan.pth \
+  --save_csv`
+
  `python src/tools/sanity_check_info.py \
     --features_dir data/features_uni2 \
     --subtypes ET PV \
     --score_type cellular_purple_frac \
     --num_rois 100
     --postfix v2`
+
+
+`python src/tools/compare_reti_features.py \
+--raw_dir data/raw \
+--features_dir data/features_virchow2_reti`
+
+`python src/tools/reti_plot_curves.py --log_path experiments/reti_mean_pool_uni2_20260413_145001/reti_mean_pool_uni2.log --postfix reti_mean_pool_uni2_20260413_145001`
+
+`python src/eval_grading_reti.py --checkpoint experiments/reti_mean_pool_uni2_20260413_145001/best_reti_mean_pool_uni2.pth`
