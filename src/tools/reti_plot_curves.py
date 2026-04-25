@@ -38,6 +38,7 @@ def parse_log(log_path: str):
 
 
 def plot_curves(epochs, train_losses, train_qwks, val_losses, val_qwks, output_path: Path):
+    plt.rcParams.update({"font.size": 16})
     fig, (ax_loss, ax_qwk) = plt.subplots(1, 2, figsize=(14, 5))
 
     # --- Left subplot: Loss ---

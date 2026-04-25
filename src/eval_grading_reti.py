@@ -11,10 +11,11 @@ Usage:
 """
 
 import argparse
+import csv
 import random
 from datetime import datetime
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -97,6 +98,17 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=4,
         help="DataLoader workers (default: 4).",
+    )
+    parser.add_argument(
+        "--map_scale",
+        action="store_true",
+        help="Map scalebar_micron from --scalebar_csv onto the predictions CSV (disabled by default).",
+    )
+    parser.add_argument(
+        "--scalebar_csv",
+        type=str,
+        default="results/scalebar_results.csv",
+        help="Path to scalebar_results.csv (used only when --map_scale is set).",
     )
     return parser.parse_args()
 
@@ -247,6 +259,98 @@ def collect_predictions(
             all_labels.append(label)
 
     return all_labels, all_preds
+
+
+# ── predictions CSV ───────────────────────────────────────────────────────
+
+GRADE_NAMES = ("G0", "G1", "G2", "G3")
+
+
+def _extract_grade_from_folder(folder_name: str) -> Optional[str]:
+    """Return the grade substring (e.g. 'G2') found in *folder_name*, or None."""
+    for grade in GRADE_NAMES:
+        if grade in folder_name:
+            return grade
+    return None
+
+
+def _load_scalebar_lookup(scalebar_csv: Path) -> dict:
+    """Read scalebar_results.csv into a (subtype, patient, filename) -> micron dict."""
+    lookup: dict = {}
+    with open(scalebar_csv, newline="") as fh:
+        reader = csv.DictReader(fh)
+        for row in reader:
+            key = (row["subtype"], row["patient"], row["filename"])
+            lookup[key] = row["scalebar_micron"]
+    return lookup
+
+
+def write_predictions_csv(
+    full_dataset: GradingBagDatasetFull,
+    test_idx: List[int],
+    all_labels: List[int],
+    all_preds: List[int],
+    class_names: List[str],
+    save_path: Path,
+    scalebar_csv: Optional[Path] = None,
+) -> None:
+    """
+    Write per-sample predictions to ``save_path``.
+
+    Columns: subtype, patient, grade, filename, slide_id,
+             true_label, true_grade, pred_label, pred_grade, correct
+    When *scalebar_csv* is provided, an additional ``scalebar_micron`` column is
+    populated by matching on (subtype, patient, filename).
+    """
+    scalebar_lookup = _load_scalebar_lookup(scalebar_csv) if scalebar_csv else None
+
+    fieldnames = [
+        "subtype",
+        "patient",
+        "grade",
+        "filename",
+        "slide_id",
+        "true_label",
+        "true_grade",
+        "pred_label",
+        "pred_grade",
+        "correct",
+    ]
+    if scalebar_lookup is not None:
+        fieldnames.append("scalebar_micron")
+
+    with open(save_path, "w", newline="") as fh:
+        writer = csv.DictWriter(fh, fieldnames=fieldnames)
+        writer.writeheader()
+
+        for i, idx in enumerate(test_idx):
+            pt_path = full_dataset.get_slide_path(idx)
+            slide_id = pt_path.stem
+            patient = pt_path.parent.name
+            subtype = pt_path.parent.parent.name
+            filename = f"{slide_id}.tif"
+            grade = _extract_grade_from_folder(patient)
+
+            true_label = int(all_labels[i])
+            pred_label = int(all_preds[i])
+
+            record = {
+                "subtype": subtype,
+                "patient": patient,
+                "grade": grade or "",
+                "filename": filename,
+                "slide_id": slide_id,
+                "true_label": true_label,
+                "true_grade": class_names[true_label],
+                "pred_label": pred_label,
+                "pred_grade": class_names[pred_label],
+                "correct": int(true_label == pred_label),
+            }
+            if scalebar_lookup is not None:
+                record["scalebar_micron"] = scalebar_lookup.get(
+                    (subtype, patient, filename), ""
+                )
+            writer.writerow(record)
 
 
 # ── main ──────────────────────────────────────────────────────────────────
@@ -412,6 +516,27 @@ def main() -> None:
         title=f"Reticulin Grading – {model_type.upper()} / {cfg['display_name']}",
     )
     log(f"\nConfusion-matrix plot saved to: {cm_path}")
+
+    # ── Predictions CSV ───────────────────────────────────────────────
+    scalebar_path: Optional[Path] = None
+    if args.map_scale:
+        scalebar_path = Path(args.scalebar_csv)
+        if not scalebar_path.exists():
+            raise FileNotFoundError(f"Scalebar CSV not found: {scalebar_path}")
+
+    predictions_csv = out_dir / "predictions.csv"
+    write_predictions_csv(
+        full_dataset=full_dataset,
+        test_idx=test_idx,
+        all_labels=all_labels,
+        all_preds=all_preds,
+        class_names=CLASS_NAMES,
+        save_path=predictions_csv,
+        scalebar_csv=scalebar_path,
+    )
+    log(f"Predictions CSV saved to: {predictions_csv}")
+    if scalebar_path is not None:
+        log(f"  Scalebar mapped from: {scalebar_path}")
 
     log(f"\n{'=' * 60}")
     log("Evaluation complete.")
