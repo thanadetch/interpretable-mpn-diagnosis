@@ -25,7 +25,7 @@ import torch
 import torch.nn as nn
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import DataLoader, Subset, WeightedRandomSampler
 from sklearn.metrics import (
     classification_report,
     cohen_kappa_score,
@@ -44,6 +44,7 @@ from models.simple_mil import SimpleGatedMIL
 from models.dual_stream_mil import DualStreamMIL
 from models.multi_branch_mil import MultiBranchMIL
 from models.mean_pool_mil import MeanPoolMIL
+from models.per_patch_score_pool_mil import PerPatchScorePoolingMIL
 
 # ── class definitions for reticulin fibrosis grading ─────────────────────
 CLASS_MAP = {"G0": 0, "G1": 1, "G2": 2, "G3": 3}
@@ -61,6 +62,11 @@ BACKBONE_CONFIG: Dict[str, Dict] = {
         "dim": 1536,
         "feature_dir": "features_uni2_reti",
         "display_name": "UNI2-h",
+    },
+    "uni2_no_patch": {
+        "dim": 1536,
+        "feature_dir": "features_uni2_reti_no_patch",
+        "display_name": "UNI2-h (no patch)",
     },
     "virchow2": {
         "dim": 1280,
@@ -433,8 +439,9 @@ def parse_args() -> argparse.Namespace:
             "dual_stream",
             "multi_branch",
             "mean_pool",
+            "patch_score_pool",
         ],
-        help="MIL model type: 'simple' | 'hybrid' | 'dual_stream' | 'multi_branch' | 'mean_pool'. Default: simple.",
+        help="MIL model type: 'simple' | 'hybrid' | 'dual_stream' | 'multi_branch' | 'mean_pool' | 'patch_score_pool'. Default: simple.",
     )
     parser.add_argument(
         "--data_root",
@@ -454,6 +461,50 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=0,
         help="Top-k pooling: use mean of k highest-attention patches. 0 = standard attention (default: 0).",
+    )
+
+    # Per-patch score pooling MIL hyperparameters (used when --model_type patch_score_pool)
+    parser.add_argument(
+        "--score_pool_mode",
+        type=str,
+        default="mean_quantile_hybrid",
+        choices=["mean", "quantile", "topk_mean", "mean_quantile_hybrid"],
+        help="Aggregation mode for PerPatchScorePoolingMIL (default: mean_quantile_hybrid).",
+    )
+    parser.add_argument(
+        "--quantile",
+        type=float,
+        default=0.75,
+        help="Quantile q used by patch_score_pool quantile/hybrid modes (default: 0.75).",
+    )
+    parser.add_argument(
+        "--topk_ratio",
+        type=float,
+        default=0.20,
+        help="Top-k ratio used by patch_score_pool topk_mean mode (default: 0.20).",
+    )
+    parser.add_argument(
+        "--hidden_dim",
+        type=int,
+        default=128,
+        help="Hidden dimension of patch_score_pool MLP head (default: 128).",
+    )
+    parser.add_argument(
+        "--max_lambda",
+        type=float,
+        default=0.50,
+        help="Upper bound for learnable mixing λ in mean_quantile_hybrid (default: 0.50).",
+    )
+    parser.add_argument(
+        "--init_lambda",
+        type=float,
+        default=0.20,
+        help="Initial value for learnable mixing λ in mean_quantile_hybrid (default: 0.20).",
+    )
+    parser.add_argument(
+        "--use_linear_patch_head",
+        action="store_true",
+        help="Use a single Linear layer instead of an MLP for the patch score head.",
     )
 
     # Experiment tracking
@@ -476,6 +527,11 @@ def parse_args() -> argparse.Namespace:
         default="classification",
         choices=["classification", "regression"],
         help="Formulation of the problem: 'classification' (4 classes) or 'regression' (scalar 0-3).",
+    )
+    parser.add_argument(
+        "--sampler_weights",
+        action="store_true",
+        help="Enable patient-balanced WeightedRandomSampler for the training loader (default: off).",
     )
     parser.add_argument(
         "--main_metric",
@@ -560,10 +616,43 @@ def main() -> None:
 
         log(f"    {split_name:<5} : " + " | ".join(parts), log_file)
 
+    # ── Patient-balanced sampling (optional) ──────────────────────────
+    train_sampler = None
+    if args.sampler_weights:
+        patient_to_label: Dict[str, int] = {}
+        bags_per_patient: Dict[str, int] = defaultdict(int)
+        patients_per_class: Dict[int, set] = defaultdict(set)
+
+        for idx in train_idx:
+            pt_path, label = full_dataset.samples[idx]
+            patient_id = pt_path.parent.name
+            patient_to_label[patient_id] = label
+            bags_per_patient[patient_id] += 1
+            patients_per_class[label].add(patient_id)
+
+        num_patients_per_class = {k: len(v) for k, v in patients_per_class.items()}
+
+        sample_weights: List[float] = []
+        for idx in train_idx:
+            pt_path, label = full_dataset.samples[idx]
+            patient_id = pt_path.parent.name
+            weight = 1.0 / (
+                num_patients_per_class[label] * bags_per_patient[patient_id]
+            )
+            sample_weights.append(weight)
+
+        train_sampler = WeightedRandomSampler(
+            weights=torch.DoubleTensor(sample_weights),
+            num_samples=len(sample_weights),
+            replacement=True,
+        )
+        log("  Using patient-balanced WeightedRandomSampler for training.", log_file)
+
     train_loader = DataLoader(
         Subset(full_dataset, train_idx),
         batch_size=args.batch_size,
-        shuffle=True,
+        shuffle=(train_sampler is None),
+        sampler=train_sampler,
         num_workers=args.num_workers,
         pin_memory=True,
         collate_fn=collate_bags,
@@ -618,6 +707,22 @@ def main() -> None:
         model = MeanPoolMIL(
             vision_dim=cfg["dim"],
             num_classes=num_classes,
+        ).to(device)
+    elif args.model_type == "patch_score_pool":
+        if args.formulation != "regression":
+            raise ValueError(
+                "patch_score_pool model requires --formulation regression."
+            )
+        model = PerPatchScorePoolingMIL(
+            input_dim=input_dim,
+            num_classes=num_classes,
+            hidden_dim=args.hidden_dim,
+            mode=args.score_pool_mode,
+            quantile=args.quantile,
+            topk_ratio=args.topk_ratio,
+            max_lambda=args.max_lambda,
+            init_lambda=args.init_lambda,
+            use_mlp_head=(not args.use_linear_patch_head),
         ).to(device)
     else:
         raise ValueError(f"Unknown model_type: {args.model_type}")

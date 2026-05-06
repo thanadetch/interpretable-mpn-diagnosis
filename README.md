@@ -155,3 +155,15 @@
 `python src/tools/reti_plot_curves.py --log_path experiments/reti_mean_pool_uni2_20260413_145001/reti_mean_pool_uni2.log --postfix reti_mean_pool_uni2_20260413_145001`
 
 `python src/eval_grading_reti.py --checkpoint experiments/reti_mean_pool_uni2_20260413_145001/best_reti_mean_pool_uni2.pth`
+
+# All test slides:
+python src/tools/reti_mean_pool_heatmap.py \
+  --checkpoint experiments/reti_mean_pool_uni2_20260413_145001/best_reti_mean_pool_uni2.pth \
+  --split test --show_rejected_mask \
+  --highlight_band 0.5
+
+
+
+# Single slide:
+python src/tools/reti_mean_pool_heatmap.py \
+  --checkpoint experiments/reti_mean_pool_uni2_20260413_145001/best_reti_mean_pool_uni2.pth --slide "ET/ET1 G1/reti10"
