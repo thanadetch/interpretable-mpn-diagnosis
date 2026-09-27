@@ -1,0 +1,13 @@
+"""a470 — TransMIL + global view, placement variant: global แตกเป็น 4 token
+
+Part of a PRE-REGISTERED batch of four placements (a468–a471) announced together and reported
+together regardless of outcome. Fifteen earlier variants around a445 all failed to beat it
+consistently, so with a locked 259-ROI test set any single winner found by scanning must be
+treated as a hypothesis, not a result.
+
+fuse='multi'. Mechanism and controls: see ``two_branch_transmil.py``.
+Gate: val QWK AND test QWK above a445 on the same backbone.
+"""
+from __future__ import annotations
+from .two_branch_transmil import Model  # noqa: F401
+KWARGS = dict(input_dim=1280, num_classes=1, fuse="multi", field="roi")
