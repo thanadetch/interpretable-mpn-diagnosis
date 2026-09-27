@@ -56,7 +56,8 @@
 
 ### Data Preprocessing Command for Patch Mode
 `python src/data/preprocess.py --patch_size 512 --step_size 256`
-`python src/data/preprocess.py --stain reti --patch_size 224 --step_size 112 --output_dir data/processed_grading`
+`python src/data/preprocess.py --stain reti --patch_size 224 --step_size 112 --output_dir data/processed_grading --crop_top 57 --crop_bottom 40 --use_od_filter --save_rejected --tissue_threshold 0.05 --min_tissue_ratio 0.10`
+`python src/data/preprocess_no_patch.py --stain reti`
 `python src/data/preprocess.py --stain he --patch_size 512 --step_size 256 --output_dir data/processed_subtype`
 `python src/data/preprocess.py --stain he --patch_size 224 --step_size 112 --output_dir data/processed_subtype`
 `python src/data/preprocess.py --stain he --patch_size 224 --step_size 112 --output_dir data/processed_subtype --crop_top 57 --crop_bottom 40 --use_od_filter --save_rejected`

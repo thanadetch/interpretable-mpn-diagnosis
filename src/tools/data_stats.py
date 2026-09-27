@@ -489,13 +489,22 @@ def main():
 
     # ==================================================================
     # 2b. Actual Train/Val/Test Split for Grading (from train_grading_reti.py)
+    # Grading uses reticulin features; pin to features_titan_reti.
     # ==================================================================
-    if features_dir is not None:
+    grading_features_dir = Path("data/features_titan_reti")
+    if not grading_features_dir.exists() or not grading_features_dir.is_dir():
+        print(
+            f"\n  ⚠️  Grading features directory '{grading_features_dir}' not found. Skipping grading split statistics."
+        )
+    else:
+        print(
+            f"\n  ℹ️  Using '{grading_features_dir}' as reference for grading split statistics."
+        )
         grading_headers, grading_rows = calculate_actual_grading_split(
-            features_dir, seed=args.seed
+            grading_features_dir, seed=args.seed
         )
         print_table(
-            f"ACTUAL Grading Data Split (Sourced from train_grading_reti.py, Seed={args.seed}, Ref: {features_dir.name})",
+            f"ACTUAL Grading Data Split (Sourced from train_grading_reti.py, Seed={args.seed}, Ref: {grading_features_dir.name})",
             grading_headers,
             grading_rows,
         )

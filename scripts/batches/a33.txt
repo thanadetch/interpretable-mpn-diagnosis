@@ -1,0 +1,10 @@
+# Batch a33 - seventeenth novelty batch (H16_multi_query_K_sweep).
+# K-sweep of multi-query cross-attention. a30 (K=1) val 0.7822, a29 (K=4)
+# val 0.7997. Test whether K=8 continues the K=4 > K=1 trend or saturates.
+#
+# a33 (main):     K=8 cross-attention queries (173,761 params)
+# a34 (ablation): K=2 cross-attention queries (172,609 params)
+# Together with a30 (K=1) + a29 (K=4): clean 4-point sweep at K in {1,2,4,8}.
+a33_multi_query_xattn_k8
+a34_multi_query_xattn_k2
+

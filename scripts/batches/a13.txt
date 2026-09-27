@@ -1,0 +1,15 @@
+# Batch a13 — seventh novelty batch (H8_attn_mean_concat_ensemble).
+# Pivot from "find right pooling" to regularization-via-ensemble. Pair
+# the adaptive attention pool with a non-adaptive mean pool inside a
+# single concat'd bag rep. The mean branch has zero per-patch DOF -- it
+# CANNOT overfit per-patch noise -- so it acts as a regularizing anchor
+# against the train_qwk -> 1.0 overfit pattern that closed batches 1..6.
+#
+# a13 (main):     bag = concat(attn_pool, mean_pool) -> Linear(256, 1).
+# a14 (ablation): bag = mean_pool only -> Linear(128, 1). Removes the
+#                 attention branch. Tests whether the combo (a13) beats
+#                 mean-alone. If a13 > a14 AND a13 > baseline, the
+#                 attention+mean concat is the active ingredient.
+a13_attn_mean_concat
+a14_mean_only
+

@@ -1,0 +1,19 @@
+# Batch a29 - fifteenth novelty batch (H15_multi_query_xattn).
+# Genuinely new architectural family: Perceiver-style multi-query cross-
+# attention as a bag-rep bottleneck. NOT in any DE row (a01-a28 covered
+# augmentations of softmax-mean, presence/severity sigmoids, frozen
+# scalar axes, hedged blends - never multi-head cross-attention).
+#
+# Pathology rationale: reticulin fibrosis presents as several distinct
+# visual sub-patterns (fine fibres, coarse bundles, replacement, nodules).
+# A single attention head must collapse all of these; K queries can each
+# specialise on a different sub-pattern and let the head fuse them.
+# K queries also act as a structural bottleneck (K << N): cannot overfit
+# per-patch noise the way per-patch attention weights can.
+#
+# a29 (main):     K=4 learnable concept queries cross-attend to bottleneck features.
+# a30 (ablation): K=1 (single query) - isolates "having multiple queries"
+#                  as the active ingredient vs the cross-attention architecture itself.
+a29_multi_query_xattn
+a30_multi_query_xattn_k1
+

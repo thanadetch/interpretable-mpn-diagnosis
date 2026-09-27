@@ -2,7 +2,7 @@
 Training pipeline for MIL WSI classification.
 
 Supports:
-    - SimpleGatedMIL: Lightweight gated-attention MIL (recommended for small datasets)
+    - ABMIL: Lightweight gated-attention MIL (recommended for small datasets)
     - DTFD-MIL: Double-Tier Feature Distillation (Zhang et al., CVPR 2022)
 
 Trains models on pre-extracted backbone features to classify
@@ -510,7 +510,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--attention_bias",
         action="store_true",
-        help="Enable attention logit bias using extracted metrics (for SimpleGatedMIL ablation).",
+        help="Enable attention logit bias using extracted metrics (for ABMIL ablation).",
     )
 
     parser.add_argument(

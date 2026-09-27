@@ -1,0 +1,16 @@
+# Batch a43 - rank-norm soft-mean port to Virchow2 baseline (H21).
+# Legacy `a25_rank_norm_softmean` (parameter-free rank-by-norm softmax
+# attention proxy) was the only novelty that ever beat the legacy
+# UNI2 + mean_pool baseline on BOTH val (0.8185 vs 0.8090) and test
+# (0.9235 vs 0.9129). Never re-evaluated against the current Virchow2 +
+# SimpleGatedMIL baseline (val_qwk 0.8182 / test_qwk 0.9476).
+#
+# a43 (main):     direct projection, no bottleneck — bit-for-bit port of
+#                 legacy a25 with input_dim=1280 (Virchow2).
+# a44 (ablation): same rank-norm pooling but with SimpleGatedMIL's
+#                 Linear(1280, 128) + ReLU + Dropout(0.5) bottleneck
+#                 inserted before pooling. Isolates "no bottleneck" as
+#                 part of the active ingredient.
+a43_rank_norm_softmean
+a44_rank_norm_softmean_bottleneck
+

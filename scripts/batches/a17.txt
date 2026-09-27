@@ -1,0 +1,23 @@
+# Batch a17 — ninth novelty batch (H10_coverage_x_length_norm_stack).
+# CRITICAL CONTEXT: batch 8 positive control (a16 = bit-for-bit
+# SimpleGatedMIL via novelty_attempt path, K_max disabled) gave val
+# 0.7811 / test 0.9607 -- the locked baseline gate (0.8182 / 0.9476)
+# is therefore NOT reproducible under the novelty_attempt code path;
+# it appears to be a one-off lucky run under --model_type simple.
+# REFRAMED gate vs reproducible baseline a16: val > 0.7811 AND
+# test > 0.9607.
+#
+# Under THAT gate, a09 (val 0.7920, test 0.9517) and a07 (val 0.7868,
+# test 0.9596) each beat a16 on val but fail test by 0.009 / 0.001.
+# a07 is within 1 ROI of a16 on test. H10 stacks both mechanisms:
+#   - H1 (a09): per-patch coverage prior c_i = sigmoid((||h_i||-tau)/beta),
+#     injected as alpha*log(c_i) into the attention logit.
+#   - H4 (a07): length-normalised softmax temperature T = c0/sqrt(N).
+# Both keep an unbounded Linear(128,1) head (no DE11-13 sigmoid trap).
+#
+# a17 (main):     coverage prior + length-norm temperature stacked.
+# a18 (ablation): length-norm only (use_coverage=False) ~= a07. Positive
+#                 control: should reproduce a07's val ~0.7868 / test ~0.9596.
+a17_coverage_length_norm
+a18_length_norm_only
+

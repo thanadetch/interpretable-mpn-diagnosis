@@ -1,0 +1,14 @@
+# Batch a09 — fifth novelty batch (H1_coverage_via_temperature).
+# Mechanism family: per-patch coverage prior c_i = sigmoid((||h_i|| - tau) / beta)
+# injected as log(c_i) into the attention logit. Coverage REWEIGHTS the
+# soft-mean, it does NOT gate the prediction -- so we avoid the
+# DE11/DE12/DE13 pathology (any sigmoid between the bag rep and y_hat
+# saturates under SmoothL1 regression). The regression head stays an
+# unbounded Linear(128 -> 1), identical to the SimpleGatedMIL baseline.
+#
+# a09 (main):     beta learnable -- soft transition zone.
+# a10 (ablation): beta fixed at 0.05 -- near-step threshold.
+# Tests whether the SOFT transition zone is the active ingredient.
+a09_coverage_attn_weight
+a10_coverage_attn_weight_hard
+

@@ -1,0 +1,19 @@
+# Batch a25 — thirteenth novelty batch (H3_projection_onto_fibrosis_axis).
+# REPLACES the gated-attention softmax-mean with a per-patch projection
+# onto an offline-computed prototype direction
+#     axis = (c_G3 - c_G0) / ||c_G3 - c_G0||
+# where c_g is the mean Virchow2 patch feature over all train-patient
+# patches with grade g (see scripts/compute_grade_prototypes.py).
+#
+# Motivated by the cross-batch finding (DE11-21): every augmentation on
+# top of SimpleGatedMIL plateaus at val_qwk in [0.77, 0.80]. The
+# diagnostic across DE11-15 was explicit: "consider REPLACING the
+# softmax-mean rather than augmenting it." H3 does that, with a
+# pathology-motivated frozen attention scorer.
+#
+# a25 (main):     prototype-derived (c_G3 - c_G0) axis, frozen, 164k params.
+# a26 (ablation): random unit-vector axis (seed=2), frozen, same param count.
+# If a25 >> a26 on val_qwk, the prototype direction is the active ingredient.
+a25_fibrosis_axis_projection
+a26_random_axis_projection
+

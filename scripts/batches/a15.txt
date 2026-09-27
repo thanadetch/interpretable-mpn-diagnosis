@@ -1,0 +1,19 @@
+# Batch a15 — eighth novelty batch (H9_bag_subsample_aug).
+# PIVOT from architecture to TRAINING-TIME DATA AUGMENTATION. Six prior
+# batches all hit the same overfit signature: train_qwk -> 0.97+, val
+# peaks at 0.78-0.80 then degrades. With 857 train bags, any aggregator
+# variant memorises. H9 leaves the SimpleGatedMIL aggregator untouched
+# (same 197,250 params, bit-for-bit identical at inference) but caps the
+# training bag size at K_max=24, randomly subsampling each step. This:
+#   (a) breaks the "many patches -> G0" shortcut (G0 mean is 53.4 patches
+#       vs 36-41 for G1/G2/G3, see section 5.5),
+#   (b) multiplies the effective training distribution (a 100-patch G0 bag
+#       becomes a different 24-patch view every epoch),
+#   (c) is parameter-free and inference-identical to baseline.
+#
+# a15 (main):     K_max=24, random subsample at train, full bag at eval.
+# a16 (ablation): K_max=10_000, subsampling disabled -- positive control,
+#                 should reproduce baseline val_qwk=0.8182.
+a15_bag_subsample_aug
+a16_bag_subsample_aug_off
+

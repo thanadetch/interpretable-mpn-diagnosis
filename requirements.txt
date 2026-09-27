@@ -31,3 +31,7 @@ einops-exts==0.0.4
 transformers==4.46.0
 huggingface-hub
 pacmap
+# YAML for scripts/novelty_status.py + scripts/loop_runner.sh
+# (parses NOVELTY_NOTES.md frontmatter; added 2026-05-25 for the
+# bucket-saturation enforcement rule, playbook §0 rule 7).
+PyYAML>=6.0

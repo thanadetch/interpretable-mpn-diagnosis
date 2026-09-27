@@ -1,0 +1,14 @@
+# Batch a35 - eighteenth novelty batch (H18_query_diversity_regulariser).
+# Add orthogonality penalty between K=4 cross-attention queries via a
+# backward hook (no trainer changes). Sanity test confirmed: without
+# the regulariser, queries collapse toward similar directions
+# (off-orthogonality 0.51 -> 0.91 after 20 Adam steps); with it,
+# they spread out (0.51 -> 0.14). If query redundancy was the
+# cause of K=8's val drop (batch 17), regulariser should let K=4
+# beat its a29 score of 0.7997.
+#
+# a35 (main):     K=4 + lambda_div=0.1 (queries pushed toward orthogonal)
+# a36 (ablation): K=4 + lambda_div=0.0 (positive control for a29)
+a35_multi_query_diversity
+a36_multi_query_no_diversity
+

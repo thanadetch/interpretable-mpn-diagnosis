@@ -1,7 +1,7 @@
 """
 ResidualMetricMIL: Late Residual ROI-Metric Branch for MIL.
 
-Main driver  : SimpleGatedMIL-style gated attention on instance features.
+Main driver  : ABMIL-style gated attention on instance features.
 Assistant     : Tiny MLP on 7 ROI-level density/context metrics,
                zero-initialized final layer, fused via learnable scalar alpha.
 """

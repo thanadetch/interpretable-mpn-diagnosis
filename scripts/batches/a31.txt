@@ -1,0 +1,16 @@
+# Batch a31 - sixteenth novelty batch (H17_multi_query_with_a17_coverage_stack).
+# Stack a17's H10 mechanisms (coverage prior + length-norm temperature) on
+# top of a29's multi-query cross-attention base.
+#
+# Batch 15 found a29 (K=4 multi-query) > a17 on val by +0.003. Both H10
+# (coverage + length-norm) and H15 (multi-query) reweight attention
+# without putting sigma between bag rep and y. They should compose.
+#
+# a31 (main):     K=4 + coverage prior + length-norm temperature (full H17 stack).
+# a32 (ablation): K=4 + length-norm only (no coverage prior).
+# If a31 > a32: coverage adds value on top of multi-query (H17 succeeds).
+# If a31 < a32: per-norm prior interferes with query specialisation
+#                (Hint 3 diagnostic was right - norm-rank saturated).
+a31_multi_query_coverage_lengthnorm
+a32_multi_query_xattn_lengthnorm
+

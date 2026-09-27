@@ -1,0 +1,6 @@
+# Batch a01 — first novelty batch under the new
+# `simple + virchow2 + scalar regression` baseline (seed=2).
+# Hint targeted: BH1_g0_g1_absence (val G0 recall 9.5%, 40.4% of val errors).
+a01_coverage_frac_offset
+a02_coverage_mag_offset
+

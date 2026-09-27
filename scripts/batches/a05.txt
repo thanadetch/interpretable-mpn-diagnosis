@@ -1,0 +1,6 @@
+# Batch a05 — third novelty batch (H5_two_branch_presence_severity).
+# Builds on lessons from batch 1 (additive offset is monotone-downward only)
+# and batch 2 (sigmoid-bounded heads have gradient bottlenecks).
+a05_presence_severity_mult
+a06_presence_constant
+

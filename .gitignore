@@ -8,6 +8,13 @@
 out
 gen
 /data
+/data_bonefib
+/data_fused
+/data_fused3
+/runs
+/data_distract
+/data_struct
+logs
 results
 experiments
 .DS_Store

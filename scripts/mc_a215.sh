@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# Run a215 (learnable-alpha entmax) under MULTI-CLASS (classification) on all 3 backbones, seed 2.
+# Formulation ablation requested by the user (gate search itself stays locked to regression).
+# Waits for the GPU to be FREE for 40s straight first, so it never races the running gate cascade on MPS.
+set -u
+ROOT=/Users/thanadetch/projects/interpretable-mpn-diagnosis
+cd "$ROOT"
+LOGDIR=logs/mc_a215; mkdir -p "$LOGDIR"
+MASTER="$LOGDIR/master.log"
+NID=a215_adaptive_sparse_gated_attention_pooling
+
+# wait until no trainer for 5 consecutive checks (40s) -> guarantees the cascade fully exited
+wait_gpu(){ local n=0; while [ "$n" -lt 5 ]; do if pgrep -f "train_grading_reti.py" >/dev/null 2>&1; then n=0; else n=$((n+1)); fi; sleep 8; done; }
+
+echo "=== MC a215 START $(date) ===" >> "$MASTER"
+for bb in titan virchow2 uni2; do
+  wait_gpu
+  pfx=mc_a215_${bb}_s2
+  echo ">>> training $pfx $(date)" >> "$MASTER"
+  python src/train_grading_reti.py --backbone "$bb" --data_root data \
+    --model_type novelty_attempt --novelty_id "$NID" \
+    --formulation classification --main_metric macro_recall --seed 2 --lr 1e-4 --epochs 50 \
+    --batch_size 1 --early_stop_patience 15 --topk 0 --num_workers 2 \
+    --prefix "$pfx" > "$LOGDIR/${pfx}.log" 2>&1
+  d=$(ls -dt experiments/*/"${pfx}"_*/ 2>/dev/null | head -1)
+  python - "$bb" "$d" "$MASTER" <<'PY'
+import sys, json, pandas as pd
+bb, d, master = sys.argv[1], sys.argv[2], sys.argv[3]
+try:
+    vmr = float(pd.read_csv(d + "training_log.csv").val_macro_recall.max())
+    m = json.load(open(d + "test_metrics.json"))
+    rc = m.get("test_recall_per_class", {})
+    g = "/".join(f"{rc.get(k, '?')}" for k in ("G0", "G1", "G2", "G3"))
+    line = (f"[mc-a215 {bb}] val_mr={vmr:.2f} | test_qwk={m['test_qwk']:.4f} "
+            f"acc={m['test_accuracy']:.2f} mr={m['test_macro_recall']:.2f} | recall G0/G1/G2/G3={g}")
+except Exception as e:
+    line = f"[mc-a215 {bb}] ERR {e}"
+print(line); open(master, "a").write(line + "\n")
+PY
+done
+echo "=== MC a215 COMPLETE $(date) ===" >> "$MASTER"

@@ -1,0 +1,12 @@
+# Batch a23 — twelfth novelty batch (H13_hidden_dim_sweep).
+# Capacity sweep around a17 (hidden_dim=128, 197,254 params). Every
+# batch overfits training to 0.97+ within 5-10 epochs even on 857 bags.
+# Halving the bottleneck (hidden_dim=64, 90k params) may force a more
+# compact representation and reduce overfit.
+#
+# a23 (main):     a17 stack with hidden_dim=64 (~90k params, ~half a17).
+# a24 (ablation): a17 stack with hidden_dim=256 (~460k params, ~2.3x).
+# Tests both ends of the capacity axis simultaneously.
+a23_a17_hidden64
+a24_a17_hidden256
+

@@ -1,0 +1,15 @@
+# Batch a21 — eleventh novelty batch (H12_alpha_init_sweep).
+# Sensitivity sweep around the current best a17 (alpha_init=1e-3,
+# val 0.7970 / test 0.9530). Since val_qwk peaks at epoch 5-10 and
+# alpha is learnable, init effectively sets where on the val<->test
+# trade-off curve we sit.
+#
+# a21 (main):     alpha_init = 5e-4 (smaller, closer to a18/a07).
+#                 Hypothesis: better test, val possibly above a18.
+# a22 (ablation): alpha_init = 5e-3 (5x larger than a17). Probes the
+#                 upper side of the curve.
+#
+# Together with a17 (1e-3) and a18 (0.0) we get a 4-point alpha sweep.
+a21_a17_alpha_init_5e4
+a22_a17_alpha_init_5e3
+

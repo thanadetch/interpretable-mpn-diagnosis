@@ -1,0 +1,5 @@
+# Batch a03 — second novelty batch under simple + virchow2 + scalar regression.
+# Hint targeted: H6_two_sided_coverage_blend (after a01/a02 batch-1 failure).
+a03_coverage_blend_two_head
+a04_constant_blend_two_head
+

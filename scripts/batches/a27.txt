@@ -1,0 +1,22 @@
+# Batch a27 — fourteenth novelty batch (H14_prediction_level_hedged_blend).
+# Hint 4 from the fresh leader_diagnostics.py on a17.
+#
+# a17 vs locked baseline on val: wins 78 ROIs, loses 58 (Pareto trade).
+# Diagnostics finding: a17 trades 7 G1/G2 bags down to lower grades
+# vs the baseline; it doesn't help G0 (recall 9.5% either way) and
+# slightly hurts G1/G2.  A late-stage, prediction-level blend with a
+# pure mean-pool branch should recover the 58 losses without giving
+# up the 78 wins.
+#
+# Mechanistically distinct from DE17_attn_mean_concat_ensemble:
+# DE17 concatenated branches in FEATURE space (Linear head can zero
+# out the mean side). H14 blends at the PREDICTION level (cannot be
+# routed around).
+#
+# a27 (main):     alpha = 0.5 fixed (0 new trainable params over the union).
+# a28 (ablation): alpha = sigmoid(gamma), gamma learnable (1 new param).
+# If a28 drifts to alpha~1, hedging is wrong; ~0, mean alone wins;
+# ~0.5, the 50/50 blend really is the active ingredient.
+a27_hedged_blend_fixed
+a28_hedged_blend_learned
+

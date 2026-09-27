@@ -1,0 +1,11 @@
+# Batch a07 — fourth novelty batch (H4_length_normalised_softmean).
+# Different mechanism family from a01..a06 (which all targeted G0 absence
+# via coverage / presence). H4 instead targets bag-size sensitivity (BH3):
+# G0 bags routinely have 60-112 patches while G1/G2/G3 cap at ~48
+# (NOVELTY_NOTES 5.5), so softmax attention on large G0 bags can spuriously
+# concentrate on outlier patches. Re-uses the SimpleGatedMIL backbone +
+# Linear head (no sigmoid bottleneck), only the attention temperature
+# changes -> avoids the DE12/H5 gradient-bottleneck failure mode.
+a07_length_normalised_softmean
+a08_constant_temperature
+

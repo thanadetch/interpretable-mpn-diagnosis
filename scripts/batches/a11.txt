@@ -1,0 +1,15 @@
+# Batch a11 — sixth novelty batch (H7_topk_attention_mean).
+# Structural REPLACEMENT of SimpleGatedMIL's full-bag softmax-mean with
+# an attention-weighted mean over only the top-K scoring patches.
+# Motivated by the cross-cutting DE11..DE15 diagnosis: under the new
+# simple + virchow2 baseline, *augmenting* the gated-attention softmax
+# with any extra mechanism overfits val. This batch attacks the
+# replacement direction instead, with NO extra params (same 197,250 as
+# the baseline) so any val_qwk delta is purely structural.
+#
+# a11 (main):     K=5  -- top-K attention-weighted mean.
+# a12 (ablation): K=1  -- pure argmax patch (no averaging).
+# If a11 > a12, "averaging across top-K" is the active ingredient.
+a11_topk_attention_mean
+a12_topk_attention_mean_k1
+

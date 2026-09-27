@@ -1,5 +1,9 @@
 """
-SimpleGatedMIL: Lightweight Gated-Attention MIL for small datasets.
+ABMIL — Attention-based Deep Multiple Instance Learning (Ilse, Tomczak & Welling, ICML 2018),
+gated-attention variant (their Eq. 9). This is a PUBLISHED baseline method, not a model designed
+for this project; the historical class name ``SimpleGatedMIL`` is kept below only as an alias so
+existing imports and the ~470 novelty modules that reference it keep working. Refer to it as
+ABMIL in the thesis, the paper, and any discussion of results.
 
 Architecture:
     Bottleneck: Linear(input_dim, 128) -> ReLU -> Dropout(0.5)
@@ -16,9 +20,9 @@ import torch.nn.functional as F
 from typing import Optional, Tuple
 
 
-class SimpleGatedMIL(nn.Module):
+class ABMIL(nn.Module):
     """
-    Lightweight Gated-Attention MIL for small datasets.
+    ABMIL (Ilse et al., ICML 2018), gated-attention variant.
 
     Architecture:
         Bottleneck: Linear(input_dim, 128) -> ReLU -> Dropout(0.5)
@@ -114,3 +118,8 @@ class SimpleGatedMIL(nn.Module):
         if return_attention:
             return logits, attention, None
         return logits, None, None
+
+
+# Backward-compatible alias. The method is ABMIL; ``SimpleGatedMIL`` was this project's internal
+# class name and is referenced by ~90 files, so it stays importable.
+SimpleGatedMIL = ABMIL

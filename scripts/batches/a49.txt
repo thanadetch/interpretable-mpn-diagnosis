@@ -1,0 +1,6 @@
+# Batch 24 — H21 multi-resolution gated pool (multi_scale_fusion bucket).
+# First batch outside the previously-tried buckets.
+# Run with: ./scripts/loop_runner.sh --batch scripts/batches/a49.txt
+a49_multi_resolution_pool
+a50_multi_resolution_pool_collapsed
+

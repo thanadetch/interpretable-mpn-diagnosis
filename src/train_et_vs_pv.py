@@ -522,7 +522,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--attention_bias",
         action="store_true",
-        help="Enable attention logit bias using extracted metrics (for SimpleGatedMIL ablation).",
+        help="Enable attention logit bias using extracted metrics (for ABMIL ablation).",
     )
 
     # Loss / weighting ablation

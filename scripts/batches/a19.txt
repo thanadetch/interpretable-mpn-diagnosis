@@ -1,0 +1,15 @@
+# Batch a19 — tenth novelty batch (H11_input_feature_dropout).
+# Builds on a17 (current best: val 0.7970 / test 0.9530) which stacks
+# H1+H4 (coverage prior + length-normalised temperature). a17 lifts
+# val by +0.016 vs reproducible baseline a16 (0.7811) but drops test
+# from a16's 0.9607 to 0.9530 (-0.008). The drop suggests a17 still
+# overfits the magnitude signal on val patches not present in test.
+# H11 adds aggressive Bernoulli dropout on the raw 1280-d feature
+# input (training-only), forcing the bottleneck to extract redundant
+# signal across feature dims rather than memorising specific clusters.
+#
+# a19 (main):     a17 + input_dropout_p=0.2 on features [N, 1280].
+# a20 (ablation): a17 + input_dropout_p=0.0 (no-op) ~= a17 positive control.
+a19_a17_input_dropout
+a20_a17_no_input_dropout
+

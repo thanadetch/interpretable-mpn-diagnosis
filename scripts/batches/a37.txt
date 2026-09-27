@@ -1,0 +1,11 @@
+# Batch a37 - nineteenth novelty batch (H19_query_dropout).
+# Stochastic per-query dropout on the K=4 multi-query cross-attention
+# base (a29). Softer analogue of H18 orthogonality penalty (DE26).
+# Drops one of the K=4 bag-per-query slices on average per training
+# step; survivors are inverse-scaled. Eval mode is identical to a29.
+#
+# a37 (main):     q_dropout=0.25 (1-of-4 queries dropped per step on avg)
+# a38 (ablation): q_dropout=0.00 (positive control for a29 / a36)
+a37_query_dropout
+a38_query_dropout_off
+

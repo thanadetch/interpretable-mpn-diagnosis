@@ -1,0 +1,12 @@
+# Batch a45 — H22 norm_based_salience compound (length-norm temperature).
+# First batch in the `norm_based_salience` philosophy bucket per playbook
+# §0 rule 7 (added 2026-05-25). Extends a44 (val 0.798 / test 0.958) with
+# a bag-size-adaptive softmax temperature τ = softplus(c) · √N.
+#
+# a45 (main):      rank-norm + length-norm tau (τ_init=8 at N=64).
+# a46 (ablation):  rank-norm + constant learnable tau (τ_init=8.0).
+#                  Isolates the √N factor as the active ingredient on
+#                  top of a44.
+a45_rank_norm_lengthnorm
+a46_rank_norm_constant_tau
+
